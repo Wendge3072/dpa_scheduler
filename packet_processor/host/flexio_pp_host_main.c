@@ -3,7 +3,7 @@
 #include <string.h>
 
 size_t scheduler_num = 1;
-size_t tenants_num = 2;
+size_t tenants_num = MAX_TENANT_NUM;
 size_t threads_num_per_scheduler = 8;
 size_t threads_num = 0;
 size_t begin_schedr = 0;
@@ -130,7 +130,10 @@ static int listen_for_qos_requests(struct app_context *app_ctx)
 {
 	char line[256];
 
-	printf("QoS listener started. Use: qos <cycle_t0> <cycle_t1> <bw_t0> <bw_t1>, or q to exit.\n");
+	printf("QoS listener started for %zu tenants. Use: qos followed by %zu cycle "
+	       "weights and %zu bandwidth weights, or q to exit.\n",
+	       tenants_num, tenants_num,
+	       tenants_num);
 	while (fgets(line, sizeof(line), stdin)) {
 		struct host2dev_qos_update update;
 
@@ -138,8 +141,9 @@ static int listen_for_qos_requests(struct app_context *app_ctx)
 			break;
 		}
 		if (parse_qos_request(line, &update)) {
-			printf("Invalid QoS request. Example for %zu tenants: qos 30 40 30 40. Sums must be <= 100.\n",
-			       tenants_num);
+			printf("Invalid QoS request for %zu tenants. Provide %zu cycle weights "
+			       "followed by %zu bandwidth weights; each sum must be <= 100.\n",
+			       tenants_num, tenants_num, tenants_num);
 			continue;
 		}
 		if (!send_qos_update(app_ctx, &update)) {
@@ -229,6 +233,12 @@ int main(int argc, char **argv)
     if (argc > 3) {
         tenants_num = atoi(argv[3]);
     }
+
+	if (!tenants_num || tenants_num > MAX_TENANT_NUM) {
+		printf("Invalid tenants_num value. It must be between 1 and %d.\n",
+		       MAX_TENANT_NUM);
+		return -1;
+	}
 
 	if (argc > 4) {
 		threads_num_per_scheduler = atoi(argv[4]);

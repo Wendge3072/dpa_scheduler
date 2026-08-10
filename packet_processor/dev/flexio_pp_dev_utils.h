@@ -76,13 +76,8 @@ sch 线程 rollover 模式切换开关
 #define TENANT_RESTRICT_CYCLE 1
 #define TENANT_RESTRICT_BW 2
 
-// static uint32_t cycle_weights[MAX_TENANT_NUM] = {60, 40};
-// static uint32_t cycle_weights[MAX_TENANT_NUM] = {30, 70};
-static uint32_t cycle_weights[MAX_TENANT_NUM] = {50, 50};
-
-// static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {40, 60};
-static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {50, 50};
-// static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {30, 60};
+static uint32_t cycle_weights[MAX_TENANT_NUM] = {25, 25, 25, 25};
+static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {25, 25, 25, 25};
 
 enum pp_workload_type {
 	PP_WORKLOAD_L2_REFLECTOR = 0,
@@ -101,6 +96,14 @@ enum pp_workload_type {
 
 #ifndef PP_TENANT1_WORKLOAD_TYPE
 #define PP_TENANT1_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR
+#endif
+
+#ifndef PP_TENANT2_WORKLOAD_TYPE
+#define PP_TENANT2_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR
+#endif
+
+#ifndef PP_TENANT3_WORKLOAD_TYPE
+#define PP_TENANT3_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR
 #endif
 
 #define PP_MAC_SWAP_MASK 0x0000ffffffffffffULL
@@ -141,6 +144,7 @@ struct dpa_sche_context {
 	int buffer_location;
 	uint32_t window_id;
 	uint32_t idx;
+	uint32_t tenants_num;
 	struct flexio_dpa_dev_queue queues[MAX_SCHEDULER_QUEUES];
 	size_t tenant_cycle_target[MAX_TENANT_NUM];
 	size_t tenant_cycle_consumed[MAX_TENANT_NUM];

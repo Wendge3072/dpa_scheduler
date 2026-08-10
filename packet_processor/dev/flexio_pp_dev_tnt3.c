@@ -93,6 +93,7 @@ __dpa_global__ void flexio_pp_dev_32(uint64_t thread_arg)
 	struct flexio_dpa_dev_queue *rq_queues[WORKER_QUEUES_PER_THREAD];
 	enum pp_workload_type workload_types[WORKER_QUEUES_PER_THREAD];
 	register struct dpa_sche_context *sch_ctx;
+	register uint32_t tenants_num;
 	register struct flexio_dpa_dev_queue *rq_queue = NULL;
 	register size_t pkt_count = 0;
 	register size_t cycle_delta = 0;
@@ -115,17 +116,19 @@ __dpa_global__ void flexio_pp_dev_32(uint64_t thread_arg)
 		data_from_host->not_first_run = 1;
 	}
 
-	rq_queues[0] = __atomic_load_n(&thd_info->assigned_queues[0], __ATOMIC_RELAXED);
-	rq_queues[1] = __atomic_load_n(&thd_info->assigned_queues[1], __ATOMIC_RELAXED);
 	sch_ctx = __atomic_load_n(&thd_info->sch_ctx, __ATOMIC_RELAXED);
-	workload_types[0] = sch_ctx->tenant_workload_type[0];
-	workload_types[1] = sch_ctx->tenant_workload_type[1];
+	tenants_num = sch_ctx->tenants_num;
+	for (uint32_t t = 0; t < tenants_num; t++) {
+		rq_queues[t] = __atomic_load_n(&thd_info->assigned_queues[t],
+					      __ATOMIC_RELAXED);
+		workload_types[t] = sch_ctx->tenant_workload_type[t];
+	}
 #if WORKER_QUEUE_CYCLE_REPORT
 	worker_cycle_report_reset(thd_ctx);
 #endif
 
 	for (;;) {
-		for (register uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) {
+		for (register uint32_t q = 0; q < tenants_num; q++) {
 			restricted = &sch_ctx->restrict_tenant[q];
 			if (__atomic_load_n(restricted, __ATOMIC_RELAXED)) {
 				continue;
@@ -211,8 +214,9 @@ worker_sleep:
 // 		data_from_host->not_first_run = 1;
 // 	}
 
-// 	rq_queues[0] = __atomic_load_n(&thd_info->assigned_queues[0], __ATOMIC_RELAXED);
-// 	rq_queues[1] = __atomic_load_n(&thd_info->assigned_queues[1], __ATOMIC_RELAXED);
+// 	for (uint32_t t = 0; t < WORKER_QUEUES_PER_THREAD; t++) {
+// 		rq_queues[t] = __atomic_load_n(&thd_info->assigned_queues[t], __ATOMIC_RELAXED);
+// 	}
 
 // 	for (;;) {
 // 		for (register uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) {
@@ -249,6 +253,7 @@ __dpa_global__ void flexio_pp_dev_32_host(uint64_t thread_arg)
 	struct flexio_dpa_dev_queue *rq_queues[WORKER_QUEUES_PER_THREAD];
 	enum pp_workload_type workload_types[WORKER_QUEUES_PER_THREAD];
 	register struct dpa_sche_context *sch_ctx;
+	register uint32_t tenants_num;
 	register struct flexio_dpa_dev_queue *rq_queue = NULL;
 	register size_t pkt_count = 0;
 	register size_t cycle_delta = 0;
@@ -271,23 +276,25 @@ __dpa_global__ void flexio_pp_dev_32_host(uint64_t thread_arg)
 		data_from_host->not_first_run = 1;
 	}
 
-	rq_queues[0] = __atomic_load_n(&thd_info->assigned_queues[0], __ATOMIC_RELAXED);
-	rq_queues[1] = __atomic_load_n(&thd_info->assigned_queues[1], __ATOMIC_RELAXED);
 	sch_ctx = __atomic_load_n(&thd_info->sch_ctx, __ATOMIC_RELAXED);
-	workload_types[0] = sch_ctx->tenant_workload_type[0];
-	workload_types[1] = sch_ctx->tenant_workload_type[1];
+	tenants_num = sch_ctx->tenants_num;
+	for (uint32_t t = 0; t < tenants_num; t++) {
+		rq_queues[t] = __atomic_load_n(&thd_info->assigned_queues[t],
+					      __ATOMIC_RELAXED);
+		workload_types[t] = sch_ctx->tenant_workload_type[t];
+	}
 #if WORKER_QUEUE_CYCLE_REPORT
 	worker_cycle_report_reset(thd_ctx);
 #endif
 
-	for (uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) {
+	for (uint32_t q = 0; q < tenants_num; q++) {
 		if (pp_queue_acquire_host_buffer(dtctx, rq_queues[q], thd_ctx->window_id)) {
 			goto worker_sleep;
 		}
 	}
 
 	for (;;) {
-		for (register uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) {
+		for (register uint32_t q = 0; q < tenants_num; q++) {
 			restricted = &sch_ctx->restrict_tenant[q];
 			if (__atomic_load_n(restricted, __ATOMIC_RELAXED)) {
 				continue;

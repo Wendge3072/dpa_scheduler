@@ -282,6 +282,8 @@ sch_init_workloads(struct dpa_sche_context *sch_ctx)
 	static const enum pp_workload_type tenant_workload_types[MAX_TENANT_NUM] = {
 		PP_TENANT0_WORKLOAD_TYPE,
 		PP_TENANT1_WORKLOAD_TYPE,
+		PP_TENANT2_WORKLOAD_TYPE,
+		PP_TENANT3_WORKLOAD_TYPE,
 	};
 
 	for (uint32_t t = 0; t < MAX_TENANT_NUM; t++) {
@@ -301,6 +303,8 @@ void sch_ctx_init(struct flexio_dev_thread_ctx *dtctx,
 	dpa_schs_ctx[i].idx = i;
 	dpa_schs_ctx[i].window_id = data_from_host->window_id;
 	dpa_schs_ctx[i].buffer_location = data_from_host->buffer_location;
+	dpa_schs_ctx[i].tenants_num = data_from_host->tenants_num > MAX_TENANT_NUM ?
+				       MAX_TENANT_NUM : data_from_host->tenants_num;
 	sch_init_cycle_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	sch_init_bandwidth_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	sch_init_workloads(&(dpa_schs_ctx[i]));
