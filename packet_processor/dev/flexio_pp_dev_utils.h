@@ -446,10 +446,6 @@ _name(struct flexio_dev_thread_ctx *dtctx, \
 			 rq_ctx->rqd_dpa_addr) : rq_data; \
 	*tenant_id = pp_decode_tenant(sch_ctx, packet, data_sz); \
 	*forwarded = *tenant_id < sch_ctx->tenants_num && \
-		__atomic_load_n(&sch_ctx->tenant_cycle_target[*tenant_id], \
-				__ATOMIC_RELAXED) && \
-		__atomic_load_n(&sch_ctx->tenant_bw_target[*tenant_id], \
-				__ATOMIC_RELAXED) && \
 		!__atomic_load_n(&sch_ctx->restrict_tenant[*tenant_id], \
 				 __ATOMIC_RELAXED); \
 	if (*forwarded) { \

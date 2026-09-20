@@ -255,12 +255,16 @@ sch_update_bandwidth_accounting(struct dpa_sche_context *sch_ctx,
 		__atomic_store_n(&sch_ctx->tenant_bw_budget_cap[t], tenant_cap,
 				 __ATOMIC_RELAXED);
 		if (reset_current_budget) {
+			uint8_t restriction =
+				sch_ctx->tenant_cycle_target[t] && tenant_budget ?
+				TENANT_RESTRICT_NONE : TENANT_RESTRICT_BW;
+
 			__atomic_store_n(&sch_ctx->tenant_bw_budget[t], tenant_budget,
 					 __ATOMIC_RELAXED);
 			__atomic_store_n(&sch_ctx->tenant_bw_consumed[t], 0,
 					 __ATOMIC_RELAXED);
 			__atomic_store_n(&sch_ctx->restrict_tenant[t],
-					 TENANT_RESTRICT_NONE, __ATOMIC_RELAXED);
+					 restriction, __ATOMIC_RELAXED);
 		}
 		if (tenants_num <= 16 || t == 0 || t + 1 == tenants_num) {
 			flexio_dev_print("sch %d tenant %u bandwidth budget: quota=%zuB budget=%zuB cap=%zuB period=1ms weight=%u\n",
