@@ -1,83 +1,135 @@
-flexio_packet_process
-====================
+Workload-affine DPA packet processor
+====================================
 
-This example demonstrates packet processing handling.
+Design goal
+-----------
 
-The device application implements a handler for 'flexio_pp_dev' that receives
-packets from the network, swaps MAC addresses, inserts some text into the packet,
-and sends it back.
+The DPA worker must not switch packet workloads while polling. Each worker is
+built with one workload and continuously polls two fixed queue lanes. Tenants
+share those lanes, but the queue count does not grow with the tenant count.
 
-This allows the user to send UDP packets (with a packet length of 65 bytes) and
-check the content of returned packets. Additionally, the console displays the
-execution of packet processing, printing each new packet index.
+The implementation supports up to 128 tenants. The default topology is four
+tenants, eight workers per scheduler, two queues per worker, and one shard per
+worker for each tenant.
 
-Device messaging operates in synchronous mode, meaning that each message from
-the device received by the host is output immediately.
+Dispatch mapping
+----------------
 
-This sample illustrates how applications work with libraries (DPA and host),
-how to create SQ, RQ, CQ, memory keys, doorbell rings, how to create and use
-DPA memory buffers, how to use UAR, and how to create and run event handlers.
+Traffic is steered by destination MAC. For scheduler ``s``, tenant ``t`` and
+shard ``h`` the MAC offset from ``DMAC`` is:
 
-Build the project
+``(s * tenants + t) * tenant_shards + h``
+
+The host maps the flow to a fixed worker and lane:
+
+``worker = h % workers_per_scheduler``
+
+``lane = (t + h / workers_per_scheduler) % 2``
+
+``queue = worker * 2 + lane``
+
+The DPA worker decodes the tenant from the packet DMAC, applies that tenant's
+QoS admission state, and runs its build-time-selected workload. A rejected
+packet is consumed without producing an SQ entry, so a restricted tenant does
+not block an admitted tenant sharing the lane.
+
+``tenant_shards=workers`` gives each tenant one fixed lane on every worker.
+``tenant_shards=2*workers`` lets a hot tenant use both lanes on every worker.
+The latter is the bounded, explicit resource-expansion mechanism; it does not
+change the workload executed by any worker.
+
+Resource scaling
+----------------
+
+For ``W`` workers, ``T`` tenants and ``S`` shards per tenant:
+
+* data RQ/SQ pairs per scheduler: ``2W`` (bounded, independent of ``T``)
+* ingress tenant/shard bindings per scheduler: ``T*S``
+* maximum queue topology: ``W <= 32`` because a scheduler has at most 64 queues
+* maximum tenants: 128
+* shard range: ``1..2W``
+
+The previous ``full_ver`` design used ``W*T`` queue pairs and therefore reached
+the 64-queue limit at eight tenants when ``W=8``. It also encoded tenant identity
+in the selected queue. The new design moves tenant identity to the flow key and
+software admission state while keeping the worker workload fixed.
+
+Build and run
+-------------
+
+On the DPA machine:
+
+```
+source /etc/profile.d/flexio.sh
+rm -rf build
+meson setup build
+ninja -C build
+./build/packet_processor/host/flexio_packet_processor \
+    mlx5_bond_0 1 4 8 0 16 0 8
+```
+
+Invocation:
+
+```
+flexio_packet_processor <device> [schedulers] [tenants] [workers/scheduler] \
+    [scheduler EU] [worker EU] [buffer location] [shards/tenant]
+```
+
+The program accepts QoS updates on standard input. There must be one cycle
+weight and one bandwidth weight for every configured tenant:
+
+```
+qos <cycle weights...> <bandwidth weights...>
+```
+
+For four tenants, admit only tenant 1:
+
+```
+qos 0 1 0 0 0 1 0 0
+```
+
+Weights are relative integers in ``0..1000000``. A zero weight is a hard deny;
+the scheduler keeps the tenant restricted across accounting-period rollover.
+
+The workload is fixed at build time through ``PP_WORKER_WORKLOAD_TYPE`` in
+``dev/flexio_pp_dev_utils.h``. Available IDs are L2 reflector (0), checksum16
+(1), checksum-nrnd (2), and nof (3). ``PP_WORKLOAD_CHECKSUM_ROUNDS`` controls
+the checksum-nrnd iteration count.
+
+Validation on 2026-09-20
+------------------------
+
+Setup: BlueField DPA ``10.14.30.226``, traffic generator ``10.14.30.112``,
+512-byte packets, one scheduler, eight workers, L2-reflector workload. Values
+below are receive rates reported by the external DPDK traffic generator.
+
+| Case | Queue pairs | Result |
+| --- | ---: | ---: |
+| Existing ``full_ver``, 2 tenants | 16 | 5.84-5.85 Gbps total |
+| Workload-affine, 2 active tenants, 8 shards/tenant | 16 | 4.01-4.06 Gbps total |
+| Tenant 0 hard-denied, tenant 1 admitted | 16 | tenant 0: 0; tenant 1: 2.13-2.14 Gbps |
+| One tenant spread over both lanes, 16 shards | 16 | 3.82-4.25 Gbps total |
+| 128 tenants, 8 shards/tenant | 16 | startup and tenant-127 classification verified |
+
+The zero-weight test reported ``forwarded=0`` for tenant 0 while its packets
+were counted as dropped; tenant 1 continued forwarding. In the two-lane test,
+both generator flow groups were encoded as tenant 1 and DPA reported traffic
+only for tenant 1, demonstrating that one tenant can use otherwise idle lanes.
+
+The scalable design currently pays about 31% throughput versus ``full_ver`` in
+the equal two-tenant comparison. The difference is mainly the per-packet DMAC
+decode and software QoS admission/accounting in the worker hot path. Eliminating
+that cost requires moving classification/metering before the DPA hot loop (for
+example, NIC/DOCA Flow metadata or ingress meters); shared FIFO software queues
+cannot provide strict weighted service for arbitrary tenants at zero cost.
+
+Operational notes
 -----------------
-perform
-$ ./build.sh
-from root of samples
 
-Results are:
-<Samples root>/build/packet_processor/host/flexio_packet_processor
-
-Invocation
-----------
-Usage: sudo <Samples root>/build/packet_processor/host/flexio_packet_processor <mlx5 device>
-      [--nic-mode]
-Where:
- mlx5 device - the name of IB device with DPA
- --nic-mode  - optional parameter indicated that the application run from the host.
-               If the application run from DPU then the parameter is not used.
-
-For example:
-$ cd <Samples root>
-$ sudo ./build/packet_processor/host/flexio_packet_processor mlx5_0
-
-The application must run with root privileges.
-
-Running with traffic
---------------------
-Run host side sample
-$ cd <Samples root>
-$ sudo ./build/packet_processor/host/flexio_packet_processor mlx5_0
-
-Use another machine which is connected to the setup running the application.
-
-Bring the interface used as packet generator up:
-$ sudo ifconfig my_interface up
-
-Use scapy in order to run traffic to the device the application is running on:
-$ python
-
->>> from scapy.all import *
->>> from scapy.layers.inet import IP, UDP, Ether
-
->>> sendp(Ether(src="02:42:7e:7f:eb:02", dst='52:54:00:79:db:d3')/IP()/UDP()/Raw(load="===============12345678"), iface="my_interface")
-
-- Source MAC must be same as above as the application defines a steering rule for it.
-- Destination MAC can be anything.
-- Load should be kept same as above as the application looks for this pattern and changes it during
-  processing.
-- Interface name should be changed to the interfaced used for traffic generation.
-
-The packets can be viewed using tcpdump:
-$ sudo tcpdump -i my_interface -en host 127.0.0.1 -X
-
-Example output:
-11:53:51.422075 02:42:7e:7f:eb:02 > 52:54:00:12:34:56, ethertype IPv4 (0x0800), length 65: 127.0.0.1.domain > 127.0.0.1.domain: 15677 op7+% [b2&3=0x3d3d] [15677a] [15677q] [15677n] [15677au][|domain]
-        0x0000:  4500 0033 0001 0000 4011 7cb7 7f00 0001  E..3....@.|.....
-        0x0010:  7f00 0001 0035 0035 001f 42c6 3d3d 3d3d  .....5.5..B.==== <-- Original data
-        0x0020:  3d3d 3d3d 3d3d 3d3d 3d3d 3d31 3233 3435  ===========12345
-        0x0030:  3637 38                                  678
-11:53:51.700038 52:54:00:12:34:56 > 02:42:7e:7f:eb:02, ethertype IPv4 (0x0800), length 65: 127.0.0.1.domain > 127.0.0.1.domain: 26144 op8+% [b2&3=0x4576] [29728a] [25966q] [25701n] [28015au][|domain]
-        0x0000:  4500 0033 0001 0000 4011 7cb7 7f00 0001  E..3....@.|.....
-        0x0010:  7f00 0001 0035 0035 001f 42c6 6620 4576  .....5.5..B.f.Ev <-- Modified data
-        0x0020:  656e 7420 6465 6d6f 2a2a 2a2a 2a2a 2a2a  ent.demo********
-        0x0030:  2a2a 2a                                  ***
+* Use a clean build after changing DPA headers because the custom device target
+  does not reliably notice every header dependency.
+* Queue count remains bounded, but flow-rule count is ``schedulers*T*S``.
+* More shards improve a hot tenant's lane coverage; they do not create or switch
+  worker workloads.
+* Traffic statistics are batched per lane in groups of 64 packets. QoS cycle and
+  byte accounting remains per packet.

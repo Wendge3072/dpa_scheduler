@@ -263,7 +263,7 @@ int main(int argc, char **argv)
 	if (!scheduler_num || scheduler_num > 32 || !threads_num_per_scheduler ||
 	    scheduler_queue_count > MAX_SCHEDULER_QUEUES || threads_num > 190) {
 		printf("Invalid topology. Schedulers must be 1..32, workers per scheduler 1..%d, and total workers <= 190.\n",
-		       MAX_SCHEDULER_QUEUES);
+		       MAX_SCHEDULER_QUEUES / WORKER_QUEUES_PER_THREAD);
 		return -1;
 	}
 
