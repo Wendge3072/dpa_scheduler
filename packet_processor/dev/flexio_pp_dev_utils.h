@@ -76,20 +76,24 @@ sch 线程 rollover 模式切换开关
 #define TENANT_RESTRICT_CYCLE 1
 #define TENANT_RESTRICT_BW 2
 
-// static uint32_t cycle_weights[MAX_TENANT_NUM] = {60, 40};
-// static uint32_t cycle_weights[MAX_TENANT_NUM] = {30, 70};
-static uint32_t cycle_weights[MAX_TENANT_NUM] = {50, 50};
+#define PP_WORKLOAD_L2_REFLECTOR_ID 0
+#define PP_WORKLOAD_CHECKSUM16_ID 1
+#define PP_WORKLOAD_CHECKSUM_NRND_ID 2
+#define PP_WORKLOAD_NOF_ID 3
 
-// static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {40, 60};
-static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {50, 50};
-// static uint32_t bandwidth_weights[MAX_TENANT_NUM] = {30, 60};
+static uint32_t cycle_weights[MAX_TENANT_NUM];
+static uint32_t bandwidth_weights[MAX_TENANT_NUM];
 
 enum pp_workload_type {
-	PP_WORKLOAD_L2_REFLECTOR = 0,
-	PP_WORKLOAD_CHECKSUM16,
-	PP_WORKLOAD_CHECKSUM_NRND,
-	PP_WORKLOAD_NOF,
+	PP_WORKLOAD_L2_REFLECTOR = PP_WORKLOAD_L2_REFLECTOR_ID,
+	PP_WORKLOAD_CHECKSUM16 = PP_WORKLOAD_CHECKSUM16_ID,
+	PP_WORKLOAD_CHECKSUM_NRND = PP_WORKLOAD_CHECKSUM_NRND_ID,
+	PP_WORKLOAD_NOF = PP_WORKLOAD_NOF_ID,
 };
+
+#ifndef PP_WORKER_WORKLOAD_TYPE
+#define PP_WORKER_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR_ID
+#endif
 
 #ifndef PP_WORKLOAD_CHECKSUM_ROUNDS
 #define PP_WORKLOAD_CHECKSUM_ROUNDS 1
@@ -152,7 +156,12 @@ struct dpa_sche_context {
 	size_t tenant_bw_budget_cap[MAX_TENANT_NUM];
 	size_t tenant_cycle_debt[MAX_TENANT_NUM];
 	uint8_t restrict_tenant[MAX_TENANT_NUM];
-	enum pp_workload_type tenant_workload_type[MAX_TENANT_NUM];
+	uint64_t tenant_packets_forwarded[MAX_TENANT_NUM];
+	uint64_t tenant_packets_dropped[MAX_TENANT_NUM];
+	uint64_t tenant_bytes_forwarded[MAX_TENANT_NUM];
+	uint64_t dmac_base;
+	uint32_t tenants_num;
+	uint32_t tenant_shards;
 #if SCH_CYCLE_USAGE_REPORT
 	size_t tenant_cycle_report_used[MAX_TENANT_NUM];
 	size_t tenant_cycle_report_periods;
@@ -182,7 +191,7 @@ enum {
 };
 
 struct offload_dispatch_info {
-	struct flexio_dpa_dev_queue *assigned_queues[WORKER_QUEUES_PER_THREAD];
+	struct flexio_dpa_dev_queue *assigned_queue;
 	struct dpa_sche_context *sch_ctx;
 	uint32_t wakeup_cq_num;
 	eu_status status;
@@ -356,6 +365,118 @@ pp_workload_nof(struct dpa_thread_context *thd_ctx, char *packet, uint32_t packe
 	thd_ctx->idx++;
 	__dpa_thread_window_writeback();
 }
+
+static inline __attribute__((always_inline)) uint64_t
+pp_read_dmac(const char *packet)
+{
+	const uint8_t *mac = (const uint8_t *)packet;
+
+	return ((uint64_t)mac[0] << 40) |
+	       ((uint64_t)mac[1] << 32) |
+	       ((uint64_t)mac[2] << 24) |
+	       ((uint64_t)mac[3] << 16) |
+	       ((uint64_t)mac[4] << 8) |
+	       (uint64_t)mac[5];
+}
+
+static inline __attribute__((always_inline)) uint32_t
+pp_decode_tenant(const struct dpa_sche_context *sch_ctx,
+		 const char *packet, uint32_t packet_size)
+{
+	register uint64_t dmac;
+	register uint64_t offset;
+	register uint64_t binding_count;
+
+	if (packet_size < 6 || !sch_ctx->tenant_shards || !sch_ctx->tenants_num) {
+		return MAX_TENANT_NUM;
+	}
+
+	dmac = pp_read_dmac(packet);
+	if (dmac < sch_ctx->dmac_base) {
+		return MAX_TENANT_NUM;
+	}
+	offset = dmac - sch_ctx->dmac_base;
+	binding_count = (uint64_t)sch_ctx->tenants_num * sch_ctx->tenant_shards;
+	if (offset >= binding_count) {
+		return MAX_TENANT_NUM;
+	}
+
+	return (uint32_t)(offset / sch_ctx->tenant_shards);
+}
+
+/*
+ * The workload is selected at build time. A worker never branches on workload
+ * while polling, so tenant multiplexing cannot trigger a workload switch.
+ */
+static inline __attribute__((always_inline)) void
+pp_apply_worker_workload(struct dpa_thread_context *thd_ctx,
+			 char *packet, uint32_t packet_size)
+{
+#if PP_WORKER_WORKLOAD_TYPE == PP_WORKLOAD_NOF_ID
+	pp_workload_nof(thd_ctx, packet, packet_size);
+#elif PP_WORKER_WORKLOAD_TYPE == PP_WORKLOAD_CHECKSUM16_ID
+	pp_workload_checksum16(packet, packet_size);
+#elif PP_WORKER_WORKLOAD_TYPE == PP_WORKLOAD_CHECKSUM_NRND_ID
+	pp_workload_checksum_nrnd(packet, packet_size);
+#else
+	(void)thd_ctx;
+	pp_workload_l2_reflector(packet, packet_size);
+#endif
+}
+
+#define PP_DEFINE_AFFINE_QUEUE(_name, _host_buffer) \
+static inline __attribute__((always_inline)) uint32_t \
+_name(struct flexio_dev_thread_ctx *dtctx, \
+      struct dpa_thread_context *thd_ctx, \
+      struct dpa_sche_context *sch_ctx, \
+      struct flexio_dpa_dev_queue *rq_queue, \
+      sq_ctx_t *tx_sq_ctx, \
+      uint32_t tx_sq_number, \
+      uint32_t *tenant_id, \
+      uint8_t *forwarded) \
+{ \
+	register cq_ctx_t *rq_cq_ctx = &(rq_queue->rq_cq_ctx); \
+	register rq_ctx_t *rq_ctx = &(rq_queue->rq_ctx); \
+	register struct flexio_dev_wqe_rcv_data_seg *rwqe; \
+	register union flexio_dev_sqe_seg *swqe; \
+	register uint32_t rq_wqe_idx; \
+	register uint32_t data_sz; \
+	register char *rq_data; \
+	register char *packet; \
+	\
+	rq_wqe_idx = be16_to_cpu((volatile __be16)rq_cq_ctx->cqe->wqe_counter); \
+	data_sz = be32_to_cpu((volatile __be32)rq_cq_ctx->cqe->byte_cnt); \
+	rwqe = &(rq_ctx->rq_ring[rq_wqe_idx & RQ_IDX_MASK]); \
+	rq_data = (void *)be64_to_cpu((volatile __be64)rwqe->addr); \
+	packet = (_host_buffer) ? \
+		(char *)((flexio_uintptr_t)rq_data - rq_ctx->rqd_host_addr + \
+			 rq_ctx->rqd_dpa_addr) : rq_data; \
+	*tenant_id = pp_decode_tenant(sch_ctx, packet, data_sz); \
+	*forwarded = *tenant_id < sch_ctx->tenants_num && \
+		!__atomic_load_n(&sch_ctx->restrict_tenant[*tenant_id], \
+				 __ATOMIC_RELAXED); \
+	if (*forwarded) { \
+		pp_apply_worker_workload(thd_ctx, packet, data_sz); \
+		swqe = &(tx_sq_ctx->sq_ring[(tx_sq_ctx->sq_wqe_seg_idx + 2) & \
+					      SQ_IDX_MASK]); \
+		tx_sq_ctx->sq_wqe_seg_idx += 4; \
+		flexio_dev_swqe_seg_mem_ptr_data_set(swqe, data_sz, rq_queue->rq_lkey, \
+						   (uint64_t)rq_data); \
+		__dpa_thread_memory_writeback(); \
+		if (_host_buffer) { \
+			__dpa_thread_window_writeback(); \
+		} \
+		flexio_dev_qp_sq_ring_db(dtctx, ++tx_sq_ctx->sq_pi, tx_sq_number); \
+	} \
+	flexio_dev_dbr_rq_inc_pi(rq_ctx->rq_dbr); \
+	com_step_cq(rq_cq_ctx); \
+	return data_sz; \
+}
+
+PP_DEFINE_AFFINE_QUEUE(pp_queue_workload_affine, 0)
+PP_DEFINE_AFFINE_QUEUE(pp_queue_workload_affine_host, 1)
+
+#undef PP_DEFINE_AFFINE_QUEUE
 
 #define PP_DEFINE_QUEUE_WORKLOAD(_name, _workload) \
 static inline __attribute__((always_inline)) uint32_t \

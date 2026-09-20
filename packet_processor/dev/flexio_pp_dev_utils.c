@@ -101,17 +101,19 @@ __dpa_rpc__ uint64_t qos_update(uint64_t data)
 	struct host2dev_qos_update *update = (struct host2dev_qos_update *)data;
 	uint32_t tenants_num = update->tenants_num > MAX_TENANT_NUM ?
 			       MAX_TENANT_NUM : update->tenants_num;
-	uint32_t cycle_sum = 0;
-	uint32_t bw_sum = 0;
+	uint64_t cycle_sum = 0;
+	uint64_t bw_sum = 0;
 
 	for (uint32_t t = 0; t < tenants_num; t++) {
+		if (update->cycle_weights[t] > QOS_MAX_WEIGHT ||
+		    update->bandwidth_weights[t] > QOS_MAX_WEIGHT) {
+			return 1;
+		}
 		cycle_sum += update->cycle_weights[t];
 		bw_sum += update->bandwidth_weights[t];
 	}
-	if (cycle_sum > QOS_RESOURCE_PERCENT_TOTAL ||
-	    bw_sum > QOS_RESOURCE_PERCENT_TOTAL) {
-		flexio_dev_print("qos update rejected: cycle_sum=%u bw_sum=%u max=%u\n",
-				 cycle_sum, bw_sum, QOS_RESOURCE_PERCENT_TOTAL);
+	if (!cycle_sum || !bw_sum) {
+		flexio_dev_print("qos update rejected: weight sums must be non-zero\n");
 		return 1;
 	}
 
@@ -147,6 +149,29 @@ sch_bandwidth_total_budget(size_t scheduler_num)
 	return (DEFAULT_LINK_BANDWIDTH_BPS / 8 / 1000) / scheduler_count;
 }
 
+static uint64_t
+sch_weight_sum(const uint32_t *weights, size_t tenants_num)
+{
+	uint64_t total = 0;
+
+	for (uint32_t t = 0; t < tenants_num; t++) {
+		total += weights[t];
+	}
+
+	return total ? total : 1;
+}
+
+static void
+sch_init_default_weights(size_t tenants_num)
+{
+	for (uint32_t t = 0; t < MAX_TENANT_NUM; t++) {
+		uint32_t weight = t < tenants_num ? 1 : 0;
+
+		cycle_weights[t] = weight;
+		bandwidth_weights[t] = weight;
+	}
+}
+
 static void
 sch_update_cycle_accounting(struct dpa_sche_context *sch_ctx,
 			    int sch_id,
@@ -157,14 +182,16 @@ sch_update_cycle_accounting(struct dpa_sche_context *sch_ctx,
 {
 	size_t base_cycle_budget =
 		sch_cycle_total_budget(threads_num_per_scheduler, buffer_location);
+	uint64_t weight_sum;
 
 	if (tenants_num > MAX_TENANT_NUM) {
 		tenants_num = MAX_TENANT_NUM;
 	}
+	weight_sum = sch_weight_sum(cycle_weights, tenants_num);
 
 	for (uint32_t t = 0; t < tenants_num; t++) {
 		size_t tenant_quota =
-			base_cycle_budget * cycle_weights[t] / QOS_RESOURCE_PERCENT_TOTAL;
+			base_cycle_budget * cycle_weights[t] / weight_sum;
 		size_t tenant_cap = sch_budget_cap(tenant_quota);
 
 		__atomic_store_n(&sch_ctx->tenant_cycle_target[t], tenant_quota,
@@ -186,7 +213,7 @@ sch_update_cycle_accounting(struct dpa_sche_context *sch_ctx,
 			sch_ctx->tenant_cycle_report_used[t] = 0;
 		}
 #endif
-		flexio_dev_print("sch %d tenant %u cycle budget: quota=%zu budget=%zu cap=%zu period=%zu request=%u%%\n",
+		flexio_dev_print("sch %d tenant %u cycle budget: quota=%zu budget=%zu cap=%zu period=%zu weight=%u\n",
 					sch_id, t, tenant_quota,
 					sch_ctx->tenant_cycle_budget[t],
 					sch_ctx->tenant_cycle_budget_cap[t],
@@ -203,14 +230,16 @@ sch_update_bandwidth_accounting(struct dpa_sche_context *sch_ctx,
 				int reset_current_budget)
 {
 	size_t per_period_total_budget = sch_bandwidth_total_budget(scheduler_num);
+	uint64_t weight_sum;
 
 	if (tenants_num > MAX_TENANT_NUM) {
 		tenants_num = MAX_TENANT_NUM;
 	}
+	weight_sum = sch_weight_sum(bandwidth_weights, tenants_num);
 
 	for (uint32_t t = 0; t < tenants_num; t++) {
 		size_t tenant_budget = per_period_total_budget *
-			bandwidth_weights[t] / QOS_RESOURCE_PERCENT_TOTAL;
+			bandwidth_weights[t] / weight_sum;
 		size_t tenant_cap = sch_budget_cap(tenant_budget);
 
 		__atomic_store_n(&sch_ctx->tenant_bw_target[t], tenant_budget,
@@ -225,7 +254,7 @@ sch_update_bandwidth_accounting(struct dpa_sche_context *sch_ctx,
 			__atomic_store_n(&sch_ctx->restrict_tenant[t],
 					 TENANT_RESTRICT_NONE, __ATOMIC_RELAXED);
 		}
-		flexio_dev_print("sch %d tenant %u bandwidth budget: quota=%zuB budget=%zuB cap=%zuB period=1ms request=%u%%\n",
+		flexio_dev_print("sch %d tenant %u bandwidth budget: quota=%zuB budget=%zuB cap=%zuB period=1ms weight=%u\n",
 					sch_id, t, tenant_budget,
 					sch_ctx->tenant_bw_budget[t],
 					sch_ctx->tenant_bw_budget_cap[t],
@@ -276,21 +305,6 @@ sch_apply_qos_update(struct host2dev_qos_update *update)
 	}
 }
 
-static void
-sch_init_workloads(struct dpa_sche_context *sch_ctx)
-{
-	static const enum pp_workload_type tenant_workload_types[MAX_TENANT_NUM] = {
-		PP_TENANT0_WORKLOAD_TYPE,
-		PP_TENANT1_WORKLOAD_TYPE,
-	};
-
-	for (uint32_t t = 0; t < MAX_TENANT_NUM; t++) {
-		sch_ctx->tenant_workload_type[t] = tenant_workload_types[t];
-	}
-
-	return;
-}
-
 /* Initialize the app_ctx structure from the host data.
  *  data_from_host - pointer host2dev_packet_processor_data from host.
  */
@@ -301,9 +315,17 @@ void sch_ctx_init(struct flexio_dev_thread_ctx *dtctx,
 	dpa_schs_ctx[i].idx = i;
 	dpa_schs_ctx[i].window_id = data_from_host->window_id;
 	dpa_schs_ctx[i].buffer_location = data_from_host->buffer_location;
+	dpa_schs_ctx[i].dmac_base = data_from_host->dmac_base;
+	dpa_schs_ctx[i].tenants_num = data_from_host->tenants_num;
+	dpa_schs_ctx[i].tenant_shards = data_from_host->tenant_shards;
+	sch_init_default_weights(data_from_host->tenants_num);
 	sch_init_cycle_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	sch_init_bandwidth_accounting(&(dpa_schs_ctx[i]), data_from_host);
-	sch_init_workloads(&(dpa_schs_ctx[i]));
+	for (uint32_t t = 0; t < data_from_host->tenants_num; t++) {
+		dpa_schs_ctx[i].tenant_packets_forwarded[t] = 0;
+		dpa_schs_ctx[i].tenant_packets_dropped[t] = 0;
+		dpa_schs_ctx[i].tenant_bytes_forwarded[t] = 0;
+	}
 #if SCH_CYCLE_USAGE_REPORT
 	dpa_schs_ctx[i].tenant_cycle_report_periods = 0;
 #endif

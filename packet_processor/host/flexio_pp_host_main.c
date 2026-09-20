@@ -3,7 +3,8 @@
 #include <string.h>
 
 size_t scheduler_num = 1;
-size_t tenants_num = MAX_TENANT_NUM;
+size_t tenants_num = DEFAULT_TENANT_NUM;
+size_t tenant_shards = 0;
 size_t threads_num_per_scheduler = 8;
 size_t threads_num = 0;
 size_t begin_schedr = 0;
@@ -11,6 +12,16 @@ size_t begin_worker = 16;
 uint64_t DMAC = 0xa088c2320440;
 size_t buffer_location = 0;
 size_t use_copy = 1;
+
+struct tenant_flow_binding {
+	struct flow_rule *rx_rule;
+	struct flow_rule *tx_table_rule;
+	struct flow_rule *tx_vport_rule;
+	uint64_t dmac;
+	uint32_t scheduler_id;
+	uint32_t tenant_id;
+	uint32_t worker_id;
+};
 
 static size_t align_to_cacheline(size_t size)
 {
@@ -44,8 +55,8 @@ static int parse_qos_request(const char *line, struct host2dev_qos_update *updat
 				MAX_TENANT_NUM : tenants_num;
 	uint32_t needed = tenant_count * 2;
 	uint32_t parsed = 0;
-	uint32_t cycle_sum = 0;
-	uint32_t bw_sum = 0;
+	uint64_t cycle_sum = 0;
+	uint64_t bw_sum = 0;
 	const char *cursor = line;
 
 	while (*cursor && parsed < needed) {
@@ -63,7 +74,7 @@ static int parse_qos_request(const char *line, struct host2dev_qos_update *updat
 		}
 		errno = 0;
 		value = strtoul(cursor, &end, 10);
-		if (errno || end == cursor || value > QOS_RESOURCE_PERCENT_TOTAL) {
+		if (errno || end == cursor || value > QOS_MAX_WEIGHT) {
 			return -1;
 		}
 		values[parsed++] = (uint32_t)value;
@@ -87,8 +98,7 @@ static int parse_qos_request(const char *line, struct host2dev_qos_update *updat
 		bw_sum += update->bandwidth_weights[t];
 	}
 
-	if (cycle_sum > QOS_RESOURCE_PERCENT_TOTAL ||
-	    bw_sum > QOS_RESOURCE_PERCENT_TOTAL) {
+	if (!cycle_sum || !bw_sum) {
 		return -1;
 	}
 
@@ -128,9 +138,10 @@ static int send_qos_update(struct app_context *app_ctx,
 
 static int listen_for_qos_requests(struct app_context *app_ctx)
 {
-	char line[256];
+	char line[4096];
 
-	printf("QoS listener started. Use: qos <cycle_t0> <cycle_t1> <bw_t0> <bw_t1>, or q to exit.\n");
+	printf("QoS listener started. Use: qos <%zu cycle weights> <%zu bandwidth weights>, or q to exit.\n",
+	       tenants_num, tenants_num);
 	while (fgets(line, sizeof(line), stdin)) {
 		struct host2dev_qos_update update;
 
@@ -138,8 +149,8 @@ static int listen_for_qos_requests(struct app_context *app_ctx)
 			break;
 		}
 		if (parse_qos_request(line, &update)) {
-			printf("Invalid QoS request. Example for %zu tenants: qos 30 40 30 40. Sums must be <= 100.\n",
-			       tenants_num);
+			printf("Invalid QoS request. Provide exactly %zu cycle weights and %zu bandwidth weights; each is 0..%u and each group needs a non-zero sum.\n",
+			       tenants_num, tenants_num, QOS_MAX_WEIGHT);
 			continue;
 		}
 		if (!send_qos_update(app_ctx, &update)) {
@@ -230,8 +241,8 @@ int main(int argc, char **argv)
         tenants_num = atoi(argv[3]);
     }
 
-	if (tenants_num != MAX_TENANT_NUM) {
-		printf("Invalid tenants_num value. This version requires exactly %d tenants.\n",
+	if (!tenants_num || tenants_num > MAX_TENANT_NUM) {
+		printf("Invalid tenants_num value. Valid range is 1..%d.\n",
 		       MAX_TENANT_NUM);
 		return -1;
 	}
@@ -243,9 +254,10 @@ int main(int argc, char **argv)
 	threads_num = threads_num_per_scheduler * scheduler_num;
 	scheduler_queue_count = threads_num_per_scheduler * WORKER_QUEUES_PER_THREAD;
 
-	if (scheduler_queue_count > MAX_SCHEDULER_QUEUES) {
-		printf("Invalid threads_num_per_scheduler value. Max workers per scheduler is %d when each worker owns %d queues.\n",
-		       MAX_SCHEDULER_QUEUES / WORKER_QUEUES_PER_THREAD, WORKER_QUEUES_PER_THREAD);
+	if (!scheduler_num || scheduler_num > 32 || !threads_num_per_scheduler ||
+	    scheduler_queue_count > MAX_SCHEDULER_QUEUES || threads_num > 190) {
+		printf("Invalid topology. Schedulers must be 1..32, workers per scheduler 1..%d, and total workers <= 190.\n",
+		       MAX_SCHEDULER_QUEUES);
 		return -1;
 	}
 
@@ -265,14 +277,37 @@ int main(int argc, char **argv)
 		buffer_location = atoi(argv[7]);
 	}
 
+	if (argc > 8) {
+		tenant_shards = atoi(argv[8]);
+	} else {
+		tenant_shards = threads_num_per_scheduler;
+	}
+	if (!tenant_shards || tenant_shards > threads_num_per_scheduler) {
+		printf("Invalid tenant_shards value. Valid range is 1..%zu.\n",
+		       threads_num_per_scheduler);
+		return -1;
+	}
+
 	int err = 0;
 	flexio_status ret = 0;
 	struct flexio_process_attr process_attr = { NULL, 0 };
 	struct app_context app_ctx = {};
 	struct thread_context* thd_ctx = NULL;
 	struct thread_context* sch_ctx = NULL;
+	struct tenant_flow_binding *flow_bindings = NULL;
+	size_t flow_binding_count = scheduler_num * tenants_num * tenant_shards;
 
 	printf("Welcome to Flex IO SDK packet processing app.\n");
+	printf("Workload-affine dispatch: schedulers=%zu workers/scheduler=%zu tenants=%zu shards/tenant=%zu queues/worker=1 flow-rules=%zu\n",
+	       scheduler_num, threads_num_per_scheduler, tenants_num,
+	       tenant_shards, flow_binding_count);
+	printf("Tenant/shard MAC: base + ((scheduler * tenants + tenant) * shards + shard).\n");
+
+	flow_bindings = calloc(flow_binding_count, sizeof(*flow_bindings));
+	if (!flow_bindings) {
+		printf("malloc flow bindings failed\n");
+		return -1;
+	}
 
 	thd_ctx = calloc(threads_num, sizeof(struct thread_context));
 	if (thd_ctx == NULL) {
@@ -390,18 +425,46 @@ int main(int argc, char **argv)
 
 
 		for (uint32_t j = 0; j < sch_ctx[i].num_queues; j++) {
-			uint64_t cur_dmac = DMAC + i * sch_ctx[i].num_queues + j;
-			// uint64_t cur_dmac = DMAC + (uint64_t)(j * 2 + (i & 1));
-
 			sch_ctx[i].queues[j].rq_tir_obj = flexio_rq_get_tir(sch_ctx[i].queues[j].flexio_rq_ptr);
 			if (sch_ctx[i].queues[j].rq_tir_obj == NULL) {
 				printf("Fail creating rq_tir_obj (errno %d)\n", errno);
 				goto cleanup;
 			}
-			sch_ctx[i].queues[j].rx_flow_rule = create_rule_rx_mac_match(app_ctx.rx_matcher, sch_ctx[i].queues[j].rq_tir_obj, cur_dmac);
-			sch_ctx[i].queues[j].tx_flow_rule = create_rule_tx_fwd_to_sws_table(app_ctx.tx_matcher, cur_dmac);
-			sch_ctx[i].queues[j].tx_flow_rule2 = create_rule_tx_fwd_to_vport(app_ctx.tx_matcher, cur_dmac);
 		}
+
+		for (uint32_t tenant = 0; tenant < tenants_num; tenant++) {
+			for (uint32_t shard = 0; shard < tenant_shards; shard++) {
+				size_t binding_idx =
+					((size_t)i * tenants_num + tenant) * tenant_shards + shard;
+				uint32_t worker = shard % sch_ctx[i].num_queues;
+				uint64_t cur_dmac = DMAC + binding_idx;
+				struct tenant_flow_binding *binding = &flow_bindings[binding_idx];
+
+				binding->dmac = cur_dmac;
+				binding->scheduler_id = i;
+				binding->tenant_id = tenant;
+				binding->worker_id = worker;
+				binding->rx_rule = create_rule_rx_mac_match(
+					app_ctx.rx_matcher,
+					sch_ctx[i].queues[worker].rq_tir_obj,
+					cur_dmac);
+				binding->tx_table_rule = create_rule_tx_fwd_to_sws_table(
+					app_ctx.tx_matcher, cur_dmac);
+				binding->tx_vport_rule = create_rule_tx_fwd_to_vport(
+					app_ctx.tx_matcher, cur_dmac);
+				if (!binding->rx_rule || !binding->tx_table_rule ||
+				    !binding->tx_vport_rule) {
+					printf("Failed to create flow binding for scheduler=%d tenant=%u shard=%u\n",
+					       i, tenant, shard);
+					err = -1;
+					goto cleanup;
+				}
+			}
+		}
+		printf("scheduler %d: %zu queues, %zu tenant/shard bindings, DMAC 0x%012" PRIx64 "..0x%012" PRIx64 "\n",
+		       i, sch_ctx[i].num_queues, tenants_num * tenant_shards,
+		       DMAC + (uint64_t)i * tenants_num * tenant_shards,
+		       DMAC + (uint64_t)(i + 1) * tenants_num * tenant_shards - 1);
 
 		if (copy_sch_data_to_dpa(&app_ctx, &(sch_ctx[i]), buffer_location, use_copy)) {
 			printf("Failed to copy application data to DPA.\n");
@@ -420,10 +483,9 @@ int main(int argc, char **argv)
 		struct flexio_event_handler_attr handler_attr = {0};
 		uint64_t rpc_ret_val = 0;
 
-		// if(i % 2)
-        // 	handler_attr.host_stub_func = flexio_pp_dev_31;
-		// else
-		handler_attr.host_stub_func = buffer_location ? flexio_pp_dev_32_host : flexio_pp_dev_32;
+		handler_attr.host_stub_func = buffer_location ?
+					      flexio_pp_dev_worker_host :
+					      flexio_pp_dev_worker;
 
         handler_attr.affinity.type = FLEXIO_AFFINITY_STRICT;
 		handler_attr.affinity.id = i + begin_worker;
@@ -482,6 +544,20 @@ cleanup:
 	for (size_t i = 0; i < scheduler_num; i++) {    
 		if (sch_ctx[i].app_data_daddr && flexio_buf_dev_free(app_ctx.flexio_process, sch_ctx[i].app_data_daddr)) {
 		    printf("Failed to dealloc application data memory on Flex IO heap\n");
+		}
+	}
+
+	for (size_t i = 0; i < flow_binding_count; i++) {
+		if (flow_bindings[i].rx_rule && destroy_rule(flow_bindings[i].rx_rule)) {
+			printf("Failed to destroy tenant rx rule\n");
+		}
+		if (flow_bindings[i].tx_table_rule &&
+		    destroy_rule(flow_bindings[i].tx_table_rule)) {
+			printf("Failed to destroy tenant tx table rule\n");
+		}
+		if (flow_bindings[i].tx_vport_rule &&
+		    destroy_rule(flow_bindings[i].tx_vport_rule)) {
+			printf("Failed to destroy tenant tx vport rule\n");
 		}
 	}
 
@@ -581,6 +657,8 @@ cleanup:
 	if (app_ctx.ibv_ctx && ibv_close_device(app_ctx.ibv_ctx)) {
 		printf("Failed to close ibv context.\n");
 	}
+
+	free(flow_bindings);
 
 	return err;
 }

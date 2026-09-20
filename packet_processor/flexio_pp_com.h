@@ -38,10 +38,11 @@
 
 /* Scheduler configurations */
 #define MAX_SCHEDULER_QUEUES 64
-#define MAX_TENANT_NUM 2
-#define WORKER_QUEUES_PER_THREAD MAX_TENANT_NUM
+#define MAX_TENANT_NUM 128
+#define DEFAULT_TENANT_NUM 4
+#define WORKER_QUEUES_PER_THREAD 1
 #define DPA_FREQ_HZ 1800000000ULL  // 1.8GHz
-#define QOS_RESOURCE_PERCENT_TOTAL 100
+#define QOS_MAX_WEIGHT 1000000U
 
 /* Every usage of this value is in bytes */
 #define MATCH_VAL_BSIZE 64
@@ -168,6 +169,8 @@ struct host2dev_packet_processor_data_sch {
 	size_t scheduler_num;
 	size_t threads_num_per_scheduler;
 	size_t tenants_num;
+	size_t tenant_shards;
+	uint64_t dmac_base;
 } __attribute__((__packed__, aligned(8)));
 
 struct host2dev_qos_update {

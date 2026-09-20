@@ -171,17 +171,15 @@ extern struct flexio_app *DEV_APP_NAME;
 /* Flex IO packet processor device (DPA) side function stub. */
 extern flexio_func_t thd_ctx_init;
 extern flexio_func_t qos_update;
-// extern flexio_func_t flexio_pp_dev_1;
-// extern flexio_func_t flexio_pp_dev_2;
-// extern flexio_func_t flexio_pp_dev_31;
-extern flexio_func_t flexio_pp_dev_32;
-extern flexio_func_t flexio_pp_dev_32_host;
+extern flexio_func_t flexio_pp_dev_worker;
+extern flexio_func_t flexio_pp_dev_worker_host;
 extern flexio_func_t flexio_scheduler_handle;
 
 extern size_t scheduler_num;
 extern size_t threads_num_per_scheduler;
 extern size_t threads_num;
 extern size_t tenants_num;
+extern size_t tenant_shards;
 extern size_t begin_schedr;
 extern size_t begin_worker;
 extern uint64_t DMAC;

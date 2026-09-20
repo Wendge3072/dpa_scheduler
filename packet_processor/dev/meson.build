@@ -31,10 +31,8 @@
 # The meson file for build packet processor device side sample application
 
 sample_dev_srcs =  [
-#					'flexio_pp_dev_tnt1.c', 
-#					'flexio_pp_dev_tnt2.c', 
-					'flexio_pp_dev_tnt3.c', 
-					'flexio_pp_dev_sch.c', 
+					'flexio_pp_dev_worker.c',
+					'flexio_pp_dev_sch.c',
 					'flexio_pp_dev_utils.c']
 app_out_name = dev_app_name + '.a'
 

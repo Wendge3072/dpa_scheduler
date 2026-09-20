@@ -8,15 +8,11 @@ sch_assign_workers(struct host2dev_packet_processor_data_sch *data_from_host,
 
 	for (uint32_t worker_idx = 0; worker_idx < data_from_host->threads_num_per_scheduler; worker_idx++) {
 		uint32_t thd_id = i * data_from_host->threads_num_per_scheduler + worker_idx;
-		uint32_t base_queue_idx = worker_idx * WORKER_QUEUES_PER_THREAD;
 		struct offload_dispatch_info *thd_info = &offload_info[thd_id];
 
-		__atomic_store_n(&thd_info->assigned_queues[0],
-				 &(this_sch_ctx->queues[base_queue_idx]),
-				 __ATOMIC_RELAXED);
-		__atomic_store_n(&thd_info->assigned_queues[1],
-				 &(this_sch_ctx->queues[base_queue_idx + 1]),
-				 __ATOMIC_RELAXED);
+		__atomic_store_n(&thd_info->assigned_queue,
+				 &this_sch_ctx->queues[worker_idx],
+				 __ATOMIC_RELEASE);
 		__atomic_store_n(&thd_info->sch_ctx, this_sch_ctx, __ATOMIC_RELAXED);
 		thd_info->wakeup_cq_num = dpa_thds_ctx[thd_id].queue.rq_cq_ctx.cq_number;
 	}
@@ -474,6 +470,29 @@ sch_report_cycle_usage(struct dpa_sche_context *sch_ctx,
 }
 #endif
 
+static inline void
+sch_report_tenant_packets(struct dpa_sche_context *sch_ctx,
+			  int sch_id, uint32_t tenants_num)
+{
+	for (uint32_t t = 0; t < tenants_num; t++) {
+		uint64_t forwarded =
+			__atomic_exchange_n(&sch_ctx->tenant_packets_forwarded[t], 0,
+					    __ATOMIC_RELAXED);
+		uint64_t dropped =
+			__atomic_exchange_n(&sch_ctx->tenant_packets_dropped[t], 0,
+					    __ATOMIC_RELAXED);
+		uint64_t bytes =
+			__atomic_exchange_n(&sch_ctx->tenant_bytes_forwarded[t], 0,
+					    __ATOMIC_RELAXED);
+
+		flexio_dev_print("sch %d tenant %u traffic: forwarded=%llu dropped=%llu bytes=%llu\n",
+				 sch_id, t,
+				 (unsigned long long)forwarded,
+				 (unsigned long long)dropped,
+				 (unsigned long long)bytes);
+	}
+}
+
 #if SCH_LOOP_ITER_REPORT
 static inline void
 sch_report_loop_iters(struct dpa_sche_context *sch_ctx, int sch_id)
@@ -591,6 +610,7 @@ __dpa_global__ void flexio_scheduler_handle(uint64_t thread_arg) {
 #if SCH_CYCLE_USAGE_REPORT
 			sch_report_cycle_usage(this_sch_ctx, i, tenants_num);
 #endif
+			sch_report_tenant_packets(this_sch_ctx, i, tenants_num);
 #if SCH_LOOP_ITER_REPORT
 			sch_report_loop_iters(this_sch_ctx, i);
 #endif
