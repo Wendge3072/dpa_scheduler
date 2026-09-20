@@ -117,6 +117,7 @@ __dpa_rpc__ uint64_t qos_update(uint64_t data)
 		return 1;
 	}
 
+	__atomic_store_n(&qos_weights_initialized, 1, __ATOMIC_RELEASE);
 	sch_apply_qos_update(update);
 	return 0;
 }
@@ -170,6 +171,7 @@ sch_init_default_weights(size_t tenants_num)
 		cycle_weights[t] = weight;
 		bandwidth_weights[t] = weight;
 	}
+	__atomic_store_n(&qos_weights_initialized, 1, __ATOMIC_RELEASE);
 }
 
 static void
@@ -213,11 +215,17 @@ sch_update_cycle_accounting(struct dpa_sche_context *sch_ctx,
 			sch_ctx->tenant_cycle_report_used[t] = 0;
 		}
 #endif
-		flexio_dev_print("sch %d tenant %u cycle budget: quota=%zu budget=%zu cap=%zu period=%zu weight=%u\n",
-					sch_id, t, tenant_quota,
-					sch_ctx->tenant_cycle_budget[t],
-					sch_ctx->tenant_cycle_budget_cap[t],
-					(size_t)SCHED_PERIOD_CYCLES, cycle_weights[t]);
+		if (tenants_num <= 16 || t == 0 || t + 1 == tenants_num) {
+			flexio_dev_print("sch %d tenant %u cycle budget: quota=%zu budget=%zu cap=%zu period=%zu weight=%u\n",
+					 sch_id, t, tenant_quota,
+					 sch_ctx->tenant_cycle_budget[t],
+					 sch_ctx->tenant_cycle_budget_cap[t],
+					 (size_t)SCHED_PERIOD_CYCLES, cycle_weights[t]);
+		}
+	}
+	if (tenants_num > 16) {
+		flexio_dev_print("sch %d cycle budgets initialized for %zu tenants (middle tenants omitted)\n",
+				 sch_id, tenants_num);
 	}
 	return;
 }
@@ -254,11 +262,17 @@ sch_update_bandwidth_accounting(struct dpa_sche_context *sch_ctx,
 			__atomic_store_n(&sch_ctx->restrict_tenant[t],
 					 TENANT_RESTRICT_NONE, __ATOMIC_RELAXED);
 		}
-		flexio_dev_print("sch %d tenant %u bandwidth budget: quota=%zuB budget=%zuB cap=%zuB period=1ms weight=%u\n",
-					sch_id, t, tenant_budget,
-					sch_ctx->tenant_bw_budget[t],
-					sch_ctx->tenant_bw_budget_cap[t],
-					bandwidth_weights[t]);
+		if (tenants_num <= 16 || t == 0 || t + 1 == tenants_num) {
+			flexio_dev_print("sch %d tenant %u bandwidth budget: quota=%zuB budget=%zuB cap=%zuB period=1ms weight=%u\n",
+					 sch_id, t, tenant_budget,
+					 sch_ctx->tenant_bw_budget[t],
+					 sch_ctx->tenant_bw_budget_cap[t],
+					 bandwidth_weights[t]);
+		}
+	}
+	if (tenants_num > 16) {
+		flexio_dev_print("sch %d bandwidth budgets initialized for %zu tenants (middle tenants omitted)\n",
+				 sch_id, tenants_num);
 	}
 	return;
 }
@@ -318,7 +332,9 @@ void sch_ctx_init(struct flexio_dev_thread_ctx *dtctx,
 	dpa_schs_ctx[i].dmac_base = data_from_host->dmac_base;
 	dpa_schs_ctx[i].tenants_num = data_from_host->tenants_num;
 	dpa_schs_ctx[i].tenant_shards = data_from_host->tenant_shards;
-	sch_init_default_weights(data_from_host->tenants_num);
+	if (!__atomic_load_n(&qos_weights_initialized, __ATOMIC_ACQUIRE)) {
+		sch_init_default_weights(data_from_host->tenants_num);
+	}
 	sch_init_cycle_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	sch_init_bandwidth_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	for (uint32_t t = 0; t < data_from_host->tenants_num; t++) {

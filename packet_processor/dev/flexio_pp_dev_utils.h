@@ -83,6 +83,7 @@ sch 线程 rollover 模式切换开关
 
 static uint32_t cycle_weights[MAX_TENANT_NUM];
 static uint32_t bandwidth_weights[MAX_TENANT_NUM];
+static uint8_t qos_weights_initialized;
 
 enum pp_workload_type {
 	PP_WORKLOAD_L2_REFLECTOR = PP_WORKLOAD_L2_REFLECTOR_ID,
