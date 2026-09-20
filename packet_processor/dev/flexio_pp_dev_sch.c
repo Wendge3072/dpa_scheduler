@@ -10,9 +10,13 @@ sch_assign_workers(struct host2dev_packet_processor_data_sch *data_from_host,
 		uint32_t thd_id = i * data_from_host->threads_num_per_scheduler + worker_idx;
 		struct offload_dispatch_info *thd_info = &offload_info[thd_id];
 
-		__atomic_store_n(&thd_info->assigned_queue,
-				 &this_sch_ctx->queues[worker_idx],
-				 __ATOMIC_RELEASE);
+		for (uint32_t lane = 0; lane < WORKER_QUEUES_PER_THREAD; lane++) {
+			uint32_t queue_idx = worker_idx * WORKER_QUEUES_PER_THREAD + lane;
+
+			__atomic_store_n(&thd_info->assigned_queues[lane],
+					 &this_sch_ctx->queues[queue_idx],
+					 __ATOMIC_RELEASE);
+		}
 		__atomic_store_n(&thd_info->sch_ctx, this_sch_ctx, __ATOMIC_RELAXED);
 		thd_info->wakeup_cq_num = dpa_thds_ctx[thd_id].queue.rq_cq_ctx.cq_number;
 	}

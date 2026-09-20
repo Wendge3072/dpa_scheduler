@@ -62,6 +62,7 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	struct dpa_thread_context *thd_ctx = &dpa_thds_ctx[thd_id]; \
 	struct flexio_dpa_dev_queue *wakeup_queue = &thd_ctx->queue; \
 	cq_ctx_t *wakeup_cq_ctx = &wakeup_queue->rq_cq_ctx; \
+	struct flexio_dpa_dev_queue *rq_queues[WORKER_QUEUES_PER_THREAD]; \
 	register struct flexio_dpa_dev_queue *rq_queue; \
 	register struct dpa_sche_context *sch_ctx; \
 	register sq_ctx_t *tx_sq_ctx; \
@@ -83,45 +84,53 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 		data_from_host->not_first_run = 1; \
 	} \
 	\
-	rq_queue = __atomic_load_n(&thd_info->assigned_queue, __ATOMIC_ACQUIRE); \
 	sch_ctx = __atomic_load_n(&thd_info->sch_ctx, __ATOMIC_ACQUIRE); \
-	if ((_host_buffer) && \
-	    pp_queue_acquire_host_buffer(dtctx, rq_queue, thd_ctx->window_id)) { \
-		goto worker_sleep; \
+	for (uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) { \
+		rq_queues[q] = __atomic_load_n(&thd_info->assigned_queues[q], \
+						 __ATOMIC_ACQUIRE); \
+		if ((_host_buffer) && \
+		    pp_queue_acquire_host_buffer(dtctx, rq_queues[q], \
+					 thd_ctx->window_id)) { \
+			goto worker_sleep; \
+		} \
 	} \
 	WORKER_CYCLE_REPORT_RESET(thd_ctx); \
-	WORKER_SELECT_TX_QUEUE(wakeup_queue, rq_queue, tx_sq_ctx, tx_sq_number); \
 	\
 	for (;;) { \
-		queue_cycles = 0; \
-		while (queue_cycles < WORKER_QUEUE_POLL_CYCLE_LIMIT && \
-		       flexio_dev_cqe_get_owner(rq_queue->rq_cq_ctx.cqe) != \
-		       rq_queue->rq_cq_ctx.cq_hw_owner_bit) { \
-			cycle_delta = __dpa_thread_cycles(); \
-			packet_size = _queue_fn(dtctx, thd_ctx, sch_ctx, rq_queue, \
-						tx_sq_ctx, tx_sq_number, \
-						&tenant_id, &forwarded); \
-			cycle_delta = __dpa_thread_cycles() - cycle_delta; \
-			queue_cycles += cycle_delta; \
-			WORKER_CYCLE_REPORT_ACCUMULATE(thd_ctx, cycle_delta); \
-			if (tenant_id < sch_ctx->tenants_num) { \
-				if (forwarded) { \
-					__atomic_fetch_add(&sch_ctx->tenant_cycle_consumed[tenant_id], \
-							   cycle_delta, __ATOMIC_RELAXED); \
-					__atomic_fetch_add(&sch_ctx->tenant_bw_consumed[tenant_id], \
-							   packet_size, __ATOMIC_RELAXED); \
-					__atomic_fetch_add(&sch_ctx->tenant_packets_forwarded[tenant_id], \
-							   1, __ATOMIC_RELAXED); \
-					__atomic_fetch_add(&sch_ctx->tenant_bytes_forwarded[tenant_id], \
-							   packet_size, __ATOMIC_RELAXED); \
-				} else { \
-					__atomic_fetch_add(&sch_ctx->tenant_packets_dropped[tenant_id], \
-							   1, __ATOMIC_RELAXED); \
+		for (register uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) { \
+			rq_queue = rq_queues[q]; \
+			queue_cycles = 0; \
+			WORKER_SELECT_TX_QUEUE(wakeup_queue, rq_queue, tx_sq_ctx, \
+					       tx_sq_number); \
+			while (queue_cycles < WORKER_QUEUE_POLL_CYCLE_LIMIT && \
+			       flexio_dev_cqe_get_owner(rq_queue->rq_cq_ctx.cqe) != \
+			       rq_queue->rq_cq_ctx.cq_hw_owner_bit) { \
+				cycle_delta = __dpa_thread_cycles(); \
+				packet_size = _queue_fn(dtctx, thd_ctx, sch_ctx, rq_queue, \
+							tx_sq_ctx, tx_sq_number, \
+							&tenant_id, &forwarded); \
+				cycle_delta = __dpa_thread_cycles() - cycle_delta; \
+				queue_cycles += cycle_delta; \
+				WORKER_CYCLE_REPORT_ACCUMULATE(thd_ctx, cycle_delta); \
+				if (tenant_id < sch_ctx->tenants_num) { \
+					if (forwarded) { \
+						__atomic_fetch_add(&sch_ctx->tenant_cycle_consumed[tenant_id], \
+								   cycle_delta, __ATOMIC_RELAXED); \
+						__atomic_fetch_add(&sch_ctx->tenant_bw_consumed[tenant_id], \
+								   packet_size, __ATOMIC_RELAXED); \
+						__atomic_fetch_add(&sch_ctx->tenant_packets_forwarded[tenant_id], \
+								   1, __ATOMIC_RELAXED); \
+						__atomic_fetch_add(&sch_ctx->tenant_bytes_forwarded[tenant_id], \
+								   packet_size, __ATOMIC_RELAXED); \
+					} else { \
+						__atomic_fetch_add(&sch_ctx->tenant_packets_dropped[tenant_id], \
+								   1, __ATOMIC_RELAXED); \
+					} \
 				} \
-			} \
-			pkt_count++; \
-			if (pkt_count >= WORKER_BATCH_SIZE) { \
-				goto worker_sleep; \
+				pkt_count++; \
+				if (pkt_count >= WORKER_BATCH_SIZE) { \
+					goto worker_sleep; \
+				} \
 			} \
 		} \
 	} \

@@ -288,9 +288,10 @@ int main(int argc, char **argv)
 	} else {
 		tenant_shards = threads_num_per_scheduler;
 	}
-	if (!tenant_shards || tenant_shards > threads_num_per_scheduler) {
+	if (!tenant_shards ||
+	    tenant_shards > threads_num_per_scheduler * WORKER_QUEUES_PER_THREAD) {
 		printf("Invalid tenant_shards value. Valid range is 1..%zu.\n",
-		       threads_num_per_scheduler);
+		       threads_num_per_scheduler * WORKER_QUEUES_PER_THREAD);
 		return -1;
 	}
 
@@ -304,9 +305,9 @@ int main(int argc, char **argv)
 	size_t flow_binding_count = scheduler_num * tenants_num * tenant_shards;
 
 	printf("Welcome to Flex IO SDK packet processing app.\n");
-	printf("Workload-affine dispatch: schedulers=%zu workers/scheduler=%zu tenants=%zu shards/tenant=%zu queues/worker=1 flow-rules=%zu\n",
+	printf("Workload-affine dispatch: schedulers=%zu workers/scheduler=%zu tenants=%zu shards/tenant=%zu queues/worker=%d flow-rules=%zu\n",
 	       scheduler_num, threads_num_per_scheduler, tenants_num,
-	       tenant_shards, flow_binding_count);
+	       tenant_shards, WORKER_QUEUES_PER_THREAD, flow_binding_count);
 	printf("Tenant/shard MAC: base + ((scheduler * tenants + tenant) * shards + shard).\n");
 
 	flow_bindings = calloc(flow_binding_count, sizeof(*flow_bindings));
@@ -442,7 +443,12 @@ int main(int argc, char **argv)
 			for (uint32_t shard = 0; shard < tenant_shards; shard++) {
 				size_t binding_idx =
 					((size_t)i * tenants_num + tenant) * tenant_shards + shard;
-				uint32_t worker = shard % sch_ctx[i].num_queues;
+				uint32_t worker = shard % threads_num_per_scheduler;
+				uint32_t lane = (tenant +
+					(shard / threads_num_per_scheduler)) %
+					WORKER_QUEUES_PER_THREAD;
+				uint32_t queue_idx =
+					worker * WORKER_QUEUES_PER_THREAD + lane;
 				uint64_t cur_dmac = DMAC + binding_idx;
 				struct tenant_flow_binding *binding = &flow_bindings[binding_idx];
 
@@ -452,7 +458,7 @@ int main(int argc, char **argv)
 				binding->worker_id = worker;
 				binding->rx_rule = create_rule_rx_mac_match(
 					app_ctx.rx_matcher,
-					sch_ctx[i].queues[worker].rq_tir_obj,
+					sch_ctx[i].queues[queue_idx].rq_tir_obj,
 					cur_dmac);
 				binding->tx_table_rule = create_rule_tx_fwd_to_sws_table(
 					app_ctx.tx_matcher, cur_dmac);
