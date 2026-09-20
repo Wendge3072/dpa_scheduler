@@ -99,14 +99,6 @@ enum pp_workload_type {
 #define PP_WORKLOAD_CHECKSUM_ROUNDS 1
 #endif
 
-#ifndef PP_TENANT0_WORKLOAD_TYPE
-#define PP_TENANT0_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR
-#endif
-
-#ifndef PP_TENANT1_WORKLOAD_TYPE
-#define PP_TENANT1_WORKLOAD_TYPE PP_WORKLOAD_L2_REFLECTOR
-#endif
-
 #define PP_MAC_SWAP_MASK 0x0000ffffffffffffULL
 
 struct flexio_dpa_dev_queue {

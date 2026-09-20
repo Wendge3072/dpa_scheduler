@@ -461,9 +461,12 @@ sch_report_cycle_usage(struct dpa_sche_context *sch_ctx,
 				sch_ctx->tenant_cycle_report_periods : 1;
 
 	for (uint32_t t = 0; t < tenants_num; t++) {
-		flexio_dev_print("sch %d cycle report: tenant %u total_used %8zu\n",
-				 sch_id, t,
-				 sch_ctx->tenant_cycle_report_used[t] / report_periods);
+		size_t used = sch_ctx->tenant_cycle_report_used[t] / report_periods;
+
+		if (used) {
+			flexio_dev_print("sch %d cycle report: tenant %u total_used %8zu\n",
+					 sch_id, t, used);
+		}
 		sch_ctx->tenant_cycle_report_used[t] = 0;
 	}
 	sch_ctx->tenant_cycle_report_periods = 0;
@@ -485,11 +488,13 @@ sch_report_tenant_packets(struct dpa_sche_context *sch_ctx,
 			__atomic_exchange_n(&sch_ctx->tenant_bytes_forwarded[t], 0,
 					    __ATOMIC_RELAXED);
 
-		flexio_dev_print("sch %d tenant %u traffic: forwarded=%llu dropped=%llu bytes=%llu\n",
-				 sch_id, t,
-				 (unsigned long long)forwarded,
-				 (unsigned long long)dropped,
-				 (unsigned long long)bytes);
+		if (forwarded || dropped) {
+			flexio_dev_print("sch %d tenant %u traffic: forwarded=%llu dropped=%llu bytes=%llu\n",
+					 sch_id, t,
+					 (unsigned long long)forwarded,
+					 (unsigned long long)dropped,
+					 (unsigned long long)bytes);
+		}
 	}
 }
 

@@ -156,7 +156,7 @@ static int listen_for_qos_requests(struct app_context *app_ctx)
 		if (!send_qos_update(app_ctx, &update)) {
 			printf("QoS updated:");
 			for (uint32_t t = 0; t < update.tenants_num; t++) {
-				printf(" tenant%u(cycle=%u%%, bw=%u%%)", t,
+				printf(" tenant%u(cycle_weight=%u, bw_weight=%u)", t,
 				       update.cycle_weights[t],
 				       update.bandwidth_weights[t]);
 			}
@@ -232,6 +232,12 @@ static int alloc_context_host_memory(struct app_context *app_ctx,
 int main(int argc, char **argv)
 {
 	size_t scheduler_queue_count = 0;
+
+	if (argc < 2) {
+		printf("Usage: %s <device> [schedulers] [tenants] [workers/scheduler] [scheduler EU] [worker EU] [buffer location] [shards/tenant]\n",
+		       argv[0]);
+		return -1;
+	}
 
 	if (argc > 2) {
 		scheduler_num = atoi(argv[2]);
