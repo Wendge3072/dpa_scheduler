@@ -70,8 +70,8 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	register size_t queue_cycles = 0; \
 	register size_t cycle_delta = 0; \
 	register uint32_t packet_size = 0; \
-	register uint32_t tenant_id = MAX_TENANT_NUM; \
-	register uint8_t forwarded = 0; \
+	uint32_t tenant_id = MAX_TENANT_NUM; \
+	uint8_t forwarded = 0; \
 	\
 	flexio_dev_get_thread_ctx(&dtctx); \
 	com_step_cq(wakeup_cq_ctx); \

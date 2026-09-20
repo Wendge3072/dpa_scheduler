@@ -268,7 +268,7 @@ int main(int argc, char **argv)
 	if (argc > 6) {
         begin_worker = atoi(argv[6]);
 		if (begin_worker < ((scheduler_num + 15) / 16) * 16) {
-			printf("Invalid begin_worker value. It must be at least %d.\n", ((scheduler_num + 15) / 16) * 16);
+			printf("Invalid begin_worker value. It must be at least %zu.\n", ((scheduler_num + 15) / 16) * 16);
 			return -1;
 		}
     }
@@ -461,7 +461,7 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		printf("scheduler %d: %zu queues, %zu tenant/shard bindings, DMAC 0x%012" PRIx64 "..0x%012" PRIx64 "\n",
+		printf("scheduler %d: %u queues, %zu tenant/shard bindings, DMAC 0x%012" PRIx64 "..0x%012" PRIx64 "\n",
 		       i, sch_ctx[i].num_queues, tenants_num * tenant_shards,
 		       DMAC + (uint64_t)i * tenants_num * tenant_shards,
 		       DMAC + (uint64_t)(i + 1) * tenants_num * tenant_shards - 1);
