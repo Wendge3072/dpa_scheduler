@@ -28,10 +28,12 @@ The host maps the flow to a fixed worker and lane:
 
 ``queue = worker * 2 + lane``
 
-The DPA worker decodes the tenant from the packet DMAC, applies that tenant's
-QoS admission state, and runs its build-time-selected workload. A rejected
-packet is consumed without producing an SQ entry, so a restricted tenant does
-not block an admitted tenant sharing the lane.
+The NIC Direct Rules entry attaches ``tenant + 1`` as a flow tag while steering
+the packet to a fixed queue. The DPA worker reads the tag directly from the CQE,
+applies that tenant's QoS admission state, and runs its build-time-selected
+workload. It does not parse or divide the packet DMAC in the hot path. A
+rejected packet is consumed without producing an SQ entry, so a restricted
+tenant does not block an admitted tenant sharing the lane.
 
 ``tenant_shards=workers`` gives each tenant one fixed lane on every worker.
 ``tenant_shards=2*workers`` lets a hot tenant use both lanes on every worker.
@@ -51,8 +53,8 @@ For ``W`` workers, ``T`` tenants and ``S`` shards per tenant:
 
 The previous ``full_ver`` design used ``W*T`` queue pairs and therefore reached
 the 64-queue limit at eight tenants when ``W=8``. It also encoded tenant identity
-in the selected queue. The new design moves tenant identity to the flow key and
-software admission state while keeping the worker workload fixed.
+in the selected queue. The new design moves tenant identity to NIC flow metadata
+and software admission state while keeping the worker workload fixed.
 
 Build and run
 -------------
@@ -61,10 +63,9 @@ On the DPA machine:
 
 ```
 source /etc/profile.d/flexio.sh
-rm -rf build
-meson setup build
-ninja -C build
-./build/packet_processor/host/flexio_packet_processor \
+meson setup --wipe --buildtype=release build-release
+ninja -C build-release
+./build-release/packet_processor/host/flexio_packet_processor \
     mlx5_bond_0 1 4 8 0 16 0 8
 ```
 
@@ -90,13 +91,23 @@ qos 0 1 0 0 0 1 0 0
 
 Weights are relative integers in ``0..1000000``. A zero weight is a hard deny;
 the scheduler keeps the tenant restricted across accounting-period rollover.
+Positive weights are guaranteed accounting shares rather than rigid output
+ratios. The default bucket mode is work-conserving: unused budget can be lent to
+another active tenant up to its cap, so an idle or lane-limited tenant does not
+waste worker capacity.
+
+Cycle and byte accounting is sampled once per 16 admitted packets and scaled by
+16. Zero-weight admission is still checked for every packet. Sampling removes
+the two global atomic updates and two cycle-clock reads from 15 of every 16
+packets; positive-weight metering therefore has a 16-packet sampling
+granularity, while hard denial remains exact.
 
 The workload is fixed at build time through ``PP_WORKER_WORKLOAD_TYPE`` in
 ``dev/flexio_pp_dev_utils.h``. Available IDs are L2 reflector (0), checksum16
 (1), checksum-nrnd (2), and nof (3). ``PP_WORKLOAD_CHECKSUM_ROUNDS`` controls
 the checksum-nrnd iteration count.
 
-Validation on 2026-09-20
+Validation on 2026-09-21
 ------------------------
 
 Setup: BlueField DPA ``10.14.30.226``, traffic generator ``10.14.30.112``,
@@ -105,23 +116,23 @@ below are receive rates reported by the external DPDK traffic generator.
 
 | Case | Queue pairs | Result |
 | --- | ---: | ---: |
-| Existing ``full_ver``, 2 tenants | 16 | 5.84-5.85 Gbps total |
-| Workload-affine, 2 active tenants, 8 shards/tenant | 16 | 4.01-4.06 Gbps total |
-| Tenant 0 hard-denied, tenant 1 admitted | 16 | tenant 0: 0; tenant 1: 2.13-2.14 Gbps |
-| One tenant spread over both lanes, 16 shards | 16 | 3.82-4.25 Gbps total |
-| 128 tenants, 8 shards/tenant | 16 | startup and tenant-127 classification verified |
+| Existing ``full_ver``, 2 tenants | 16 | 16.08-16.17 Gbps total |
+| Workload-affine, 2 active tenants, 8 shards/tenant | 16 | 16.52-16.56 Gbps total |
+| Tenant 0 hard-denied, tenant 1 admitted | 16 | tenant 0: 0; tenant 1: 13.00-13.01 Gbps |
+| Four-tenant topology, active weights 1:3 | 16 | 6.65 and 9.57 Gbps; 16.22 Gbps total |
+| 128 tenants, 8 shards/tenant | 16 | 1,024 rules started; tenant 39 passed at 13.03-13.04 Gbps while tenant 0 stayed at 0 |
 
-The zero-weight test reported ``forwarded=0`` for tenant 0 while its packets
-were counted as dropped; tenant 1 continued forwarding. In the two-lane test,
-both generator flow groups were encoded as tenant 1 and DPA reported traffic
-only for tenant 1, demonstrating that one tenant can use otherwise idle lanes.
+All comparison binaries used Meson ``--buildtype=release`` (DPA ``-O3`` and
+LTO). The earlier 31% result came from debug binaries and also included
+per-packet DMAC decoding, per-packet accounting, and diagnostic traffic
+counters; it is not representative of the optimized implementation.
 
-The scalable design currently pays about 31% throughput versus ``full_ver`` in
-the equal two-tenant comparison. The difference is mainly the per-packet DMAC
-decode and software QoS admission/accounting in the worker hot path. Eliminating
-that cost requires moving classification/metering before the DPA hot loop (for
-example, NIC/DOCA Flow metadata or ingress meters); shared FIFO software queues
-cannot provide strict weighted service for arbitrary tenants at zero cost.
+The optimized scalable path is about 2.5% faster than the release-built
+``full_ver`` baseline in the equal two-tenant comparison. The 1:3 test is not
+expected to produce a rigid 1:3 throughput ratio: tenant 1 could not consume
+its complete 75% cycle allocation on one lane, so bucket rollover lent the
+unused share to tenant 0. This retained 16.22 Gbps aggregate throughput while
+preserving zero-weight hard isolation.
 
 Operational notes
 -----------------
@@ -131,5 +142,9 @@ Operational notes
 * Queue count remains bounded, but flow-rule count is ``schedulers*T*S``.
 * More shards improve a hot tenant's lane coverage; they do not create or switch
   worker workloads.
-* Traffic statistics are batched per lane in groups of 64 packets. QoS cycle and
-  byte accounting remains per packet.
+* A worker polls at most 64 packets from one lane before checking the other.
+  This is packet-count fairness, not a workload switch: both lanes always run
+  the same build-time workload.
+* Diagnostic per-tenant packet counters are deliberately absent from the hot
+  path. Use generator RX statistics and the optional scheduler cycle report for
+  validation.

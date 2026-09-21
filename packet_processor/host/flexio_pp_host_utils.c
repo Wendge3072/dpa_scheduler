@@ -809,23 +809,32 @@ error:
 
 static struct flow_rule *create_flow_rule_rx(struct flow_matcher *flow_matcher,
 					     struct mlx5dv_devx_obj *tir_obj,
-					     struct mlx5dv_flow_match_parameters *match_value)
+					     struct mlx5dv_flow_match_parameters *match_value,
+					     uint32_t tenant_tag)
 {
-	struct mlx5dv_dr_action *actions[1];
 	struct flow_rule *flow_rule;
 
 	flow_rule = (struct flow_rule *)calloc(1, sizeof(*flow_rule));
 	assert(flow_rule);
 
-	flow_rule->action = mlx5dv_dr_action_create_dest_devx_tir(tir_obj);
-	if (!flow_rule->action) {
+	flow_rule->actions[0] = mlx5dv_dr_action_create_tag(tenant_tag);
+	if (!flow_rule->actions[0]) {
+		printf("Failed creating flow tag action (errno %d).\n", errno);
+		goto err_out;
+	}
+	flow_rule->action_count = 1;
+
+	flow_rule->actions[1] = mlx5dv_dr_action_create_dest_devx_tir(tir_obj);
+	if (!flow_rule->actions[1]) {
 		printf("Failed creating TIR action (errno %d).\n", errno);
 		goto err_out;
 	}
-	actions[0] = flow_rule->action;
+	flow_rule->action_count = 2;
 
-	flow_rule->dr_rule = mlx5dv_dr_rule_create(flow_matcher->dr_matcher_root, match_value, 1,
-						   actions);
+	flow_rule->dr_rule = mlx5dv_dr_rule_create(flow_matcher->dr_matcher_root,
+						   match_value,
+						   flow_rule->action_count,
+						   flow_rule->actions);
 	if (!flow_rule->dr_rule) {
 		printf("Fail creating dr_rule (errno %d).\n", errno);
 		goto err_out;
@@ -834,8 +843,10 @@ static struct flow_rule *create_flow_rule_rx(struct flow_matcher *flow_matcher,
 	return flow_rule;
 
 err_out:
-	if (flow_rule->action)
-		mlx5dv_dr_action_destroy(flow_rule->action);
+	while (flow_rule->action_count) {
+		mlx5dv_dr_action_destroy(
+			flow_rule->actions[--flow_rule->action_count]);
+	}
 	free(flow_rule);
 	return NULL;
 }
@@ -849,12 +860,13 @@ static struct flow_rule *create_flow_rule_tx(struct flow_matcher *flow_matcher,
 	flow_rule = (struct flow_rule *)calloc(1, sizeof(*flow_rule));
 	assert(flow_rule);
 
-	flow_rule->action = mlx5dv_dr_action_create_dest_vport(flow_matcher->dr_domain, 0xFFFF);
-	if (!flow_rule->action) {
+	flow_rule->actions[0] = mlx5dv_dr_action_create_dest_vport(flow_matcher->dr_domain, 0xFFFF);
+	if (!flow_rule->actions[0]) {
 		printf("Failed creating dest vport action (errno %d).\n", errno);
 		goto err_out;
 	}
-	actions[0] = flow_rule->action;
+	flow_rule->action_count = 1;
+	actions[0] = flow_rule->actions[0];
 
 	flow_rule->dr_rule = mlx5dv_dr_rule_create(flow_matcher->dr_matcher_sws, match_value, 1,
 						   actions);
@@ -866,8 +878,8 @@ static struct flow_rule *create_flow_rule_tx(struct flow_matcher *flow_matcher,
 	return flow_rule;
 
 err_out:
-	if (flow_rule->action)
-		mlx5dv_dr_action_destroy(flow_rule->action);
+	if (flow_rule->actions[0])
+		mlx5dv_dr_action_destroy(flow_rule->actions[0]);
 	free(flow_rule);
 	return NULL;
 }
@@ -881,12 +893,13 @@ static struct flow_rule *create_flow_rule_tx_table(struct flow_matcher *flow_mat
 	flow_rule = (struct flow_rule *)calloc(1, sizeof(*flow_rule));
 	assert(flow_rule);
 
-	flow_rule->action = mlx5dv_dr_action_create_dest_table(flow_matcher->dr_table_sws);
-	if (!flow_rule->action) {
+	flow_rule->actions[0] = mlx5dv_dr_action_create_dest_table(flow_matcher->dr_table_sws);
+	if (!flow_rule->actions[0]) {
 		printf("Failed creating dest SWS table action (errno %d).\n", errno);
 		goto err_out;
 	}
-	actions[0] = flow_rule->action;
+	flow_rule->action_count = 1;
+	actions[0] = flow_rule->actions[0];
 
 	flow_rule->dr_rule = mlx5dv_dr_rule_create(flow_matcher->dr_matcher_root, match_value, 1,
 						   actions);
@@ -898,8 +911,8 @@ static struct flow_rule *create_flow_rule_tx_table(struct flow_matcher *flow_mat
 	return flow_rule;
 
 err_out:
-	if (flow_rule->action)
-		mlx5dv_dr_action_destroy(flow_rule->action);
+	if (flow_rule->actions[0])
+		mlx5dv_dr_action_destroy(flow_rule->actions[0]);
 	free(flow_rule);
 	return NULL;
 }
@@ -947,7 +960,8 @@ struct flow_matcher *create_matcher_tx(struct ibv_context *ibv_ctx)
 }
 
 struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
-					   struct mlx5dv_devx_obj *tir_obj, uint64_t dmac)
+					   struct mlx5dv_devx_obj *tir_obj,
+					   uint64_t dmac, uint32_t tenant_tag)
 {
 	struct mlx5dv_flow_match_parameters *match_value;
 	struct flow_rule *flow_rule;
@@ -961,7 +975,8 @@ struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
 	match_value->match_sz = MATCH_VAL_BSIZE;
 	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
 	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
-	flow_rule = create_flow_rule_rx(flow_match, tir_obj, match_value);
+	flow_rule = create_flow_rule_rx(flow_match, tir_obj, match_value,
+					 tenant_tag);
 	free(match_value);
 
 	return flow_rule;
@@ -1042,17 +1057,21 @@ int destroy_matcher(struct flow_matcher *matcher)
 
 int destroy_rule(struct flow_rule *rule)
 {
-	int err;
+	int err = 0;
 
 	err = mlx5dv_dr_rule_destroy(rule->dr_rule);
 	if (err)
 		return err;
 
-	err = mlx5dv_dr_action_destroy(rule->action);
-	if (err)
-		return err;
+	while (rule->action_count) {
+		int action_err = mlx5dv_dr_action_destroy(
+			rule->actions[--rule->action_count]);
+
+		if (action_err && !err)
+			err = action_err;
+	}
 
 	free(rule);
 
-	return 0;
+	return err;
 }

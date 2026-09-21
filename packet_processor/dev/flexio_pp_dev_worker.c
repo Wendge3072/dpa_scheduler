@@ -36,30 +36,6 @@ worker_cycle_report_print(int thd_id, struct dpa_thread_context *thd_ctx)
 #define WORKER_CYCLE_REPORT_PRINT(_id, _ctx)
 #endif
 
-#define WORKER_STATS_BATCH 64
-
-static inline __attribute__((always_inline)) void
-worker_stats_flush(struct dpa_sche_context *sch_ctx,
-		   uint32_t tenant_id,
-		   uint32_t forwarded,
-		   uint32_t dropped,
-		   uint64_t bytes)
-{
-	if (tenant_id >= sch_ctx->tenants_num || (!forwarded && !dropped)) {
-		return;
-	}
-	if (forwarded) {
-		__atomic_fetch_add(&sch_ctx->tenant_packets_forwarded[tenant_id],
-				   forwarded, __ATOMIC_RELAXED);
-		__atomic_fetch_add(&sch_ctx->tenant_bytes_forwarded[tenant_id],
-				   bytes, __ATOMIC_RELAXED);
-	}
-	if (dropped) {
-		__atomic_fetch_add(&sch_ctx->tenant_packets_dropped[tenant_id],
-				   dropped, __ATOMIC_RELAXED);
-	}
-}
-
 #if WORKER_TX_USE_PRIVATE_SQ
 #define WORKER_SELECT_TX_QUEUE(_wakeup_queue, _rq_queue, _tx_ctx, _tx_num) \
 	do { \
@@ -92,15 +68,12 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	register sq_ctx_t *tx_sq_ctx; \
 	register uint32_t tx_sq_number; \
 	register size_t pkt_count = 0; \
-	register size_t queue_cycles = 0; \
+	register uint32_t queue_packets = 0; \
+	register uint32_t account_sample = 0; \
 	register size_t cycle_delta = 0; \
 	register uint32_t packet_size = 0; \
 	uint32_t tenant_id = MAX_TENANT_NUM; \
 	uint8_t forwarded = 0; \
-	uint32_t stats_tenant[WORKER_QUEUES_PER_THREAD]; \
-	uint32_t stats_forwarded[WORKER_QUEUES_PER_THREAD] = {0}; \
-	uint32_t stats_dropped[WORKER_QUEUES_PER_THREAD] = {0}; \
-	uint64_t stats_bytes[WORKER_QUEUES_PER_THREAD] = {0}; \
 	\
 	flexio_dev_get_thread_ctx(&dtctx); \
 	com_step_cq(wakeup_cq_ctx); \
@@ -114,7 +87,6 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	\
 	sch_ctx = __atomic_load_n(&thd_info->sch_ctx, __ATOMIC_ACQUIRE); \
 	for (uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) { \
-		stats_tenant[q] = MAX_TENANT_NUM; \
 		rq_queues[q] = __atomic_load_n(&thd_info->assigned_queues[q], \
 						 __ATOMIC_ACQUIRE); \
 	} \
@@ -130,51 +102,34 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	for (;;) { \
 		for (register uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) { \
 			rq_queue = rq_queues[q]; \
-			queue_cycles = 0; \
+			queue_packets = 0; \
 			WORKER_SELECT_TX_QUEUE(wakeup_queue, rq_queue, tx_sq_ctx, \
 					       tx_sq_number); \
-			while (queue_cycles < WORKER_QUEUE_POLL_CYCLE_LIMIT && \
+			while (queue_packets < WORKER_QUEUE_POLL_PACKET_LIMIT && \
 			       flexio_dev_cqe_get_owner(rq_queue->rq_cq_ctx.cqe) != \
 			       rq_queue->rq_cq_ctx.cq_hw_owner_bit) { \
-				cycle_delta = __dpa_thread_cycles(); \
+				if (!(account_sample & WORKER_ACCOUNT_SAMPLE_MASK)) { \
+					cycle_delta = __dpa_thread_cycles(); \
+				} \
 				packet_size = _queue_fn(dtctx, thd_ctx, sch_ctx, rq_queue, \
 							tx_sq_ctx, tx_sq_number, \
 							&tenant_id, &forwarded); \
-				cycle_delta = __dpa_thread_cycles() - cycle_delta; \
-				queue_cycles += cycle_delta; \
-				WORKER_CYCLE_REPORT_ACCUMULATE(thd_ctx, cycle_delta); \
-				if (tenant_id < sch_ctx->tenants_num) { \
-					if (stats_tenant[q] != tenant_id) { \
-						worker_stats_flush(sch_ctx, stats_tenant[q], \
-								   stats_forwarded[q], \
-								   stats_dropped[q], \
-								   stats_bytes[q]); \
-						stats_tenant[q] = tenant_id; \
-						stats_forwarded[q] = 0; \
-						stats_dropped[q] = 0; \
-						stats_bytes[q] = 0; \
-					} \
+				if (!(account_sample & WORKER_ACCOUNT_SAMPLE_MASK)) { \
+					cycle_delta = __dpa_thread_cycles() - cycle_delta; \
+					WORKER_CYCLE_REPORT_ACCUMULATE(thd_ctx, cycle_delta); \
 					if (forwarded) { \
-						__atomic_fetch_add(&sch_ctx->tenant_cycle_consumed[tenant_id], \
-								   cycle_delta, __ATOMIC_RELAXED); \
-						__atomic_fetch_add(&sch_ctx->tenant_bw_consumed[tenant_id], \
-								   packet_size, __ATOMIC_RELAXED); \
-						stats_forwarded[q]++; \
-						stats_bytes[q] += packet_size; \
-					} else { \
-						stats_dropped[q]++; \
-					} \
-					if (stats_forwarded[q] + stats_dropped[q] >= \
-					    WORKER_STATS_BATCH) { \
-						worker_stats_flush(sch_ctx, stats_tenant[q], \
-								   stats_forwarded[q], \
-								   stats_dropped[q], \
-								   stats_bytes[q]); \
-						stats_forwarded[q] = 0; \
-						stats_dropped[q] = 0; \
-						stats_bytes[q] = 0; \
+						__atomic_fetch_add( \
+							&sch_ctx->tenant_cycle_consumed[tenant_id], \
+							cycle_delta << WORKER_ACCOUNT_SAMPLE_SHIFT, \
+							__ATOMIC_RELAXED); \
+						__atomic_fetch_add( \
+							&sch_ctx->tenant_bw_consumed[tenant_id], \
+							(size_t)packet_size << WORKER_ACCOUNT_SAMPLE_SHIFT, \
+							__ATOMIC_RELAXED); \
 					} \
 				} \
+				account_sample++; \
+				queue_packets++; \
 				pkt_count++; \
 				if (pkt_count >= WORKER_BATCH_SIZE) { \
 					goto worker_sleep; \
@@ -184,10 +139,6 @@ __dpa_global__ void _name(uint64_t thread_arg) \
 	} \
 	\
 worker_sleep: \
-	for (uint32_t q = 0; q < WORKER_QUEUES_PER_THREAD; q++) { \
-		worker_stats_flush(sch_ctx, stats_tenant[q], stats_forwarded[q], \
-				   stats_dropped[q], stats_bytes[q]); \
-	} \
 	WORKER_CYCLE_REPORT_PRINT(thd_id, thd_ctx); \
 	__dpa_thread_fence(__DPA_MEMORY, __DPA_W, __DPA_W); \
 	flexio_dev_cq_arm(dtctx, wakeup_cq_ctx->cq_idx, wakeup_cq_ctx->cq_number); \
@@ -205,4 +156,3 @@ PP_DEFINE_AFFINE_WORKER_HANDLER(flexio_pp_dev_worker_host,
 #undef WORKER_CYCLE_REPORT_PRINT
 #undef WORKER_CYCLE_REPORT_ACCUMULATE
 #undef WORKER_CYCLE_REPORT_RESET
-#undef WORKER_STATS_BATCH

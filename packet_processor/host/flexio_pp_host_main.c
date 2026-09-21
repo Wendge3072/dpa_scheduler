@@ -459,7 +459,7 @@ int main(int argc, char **argv)
 				binding->rx_rule = create_rule_rx_mac_match(
 					app_ctx.rx_matcher,
 					sch_ctx[i].queues[queue_idx].rq_tir_obj,
-					cur_dmac);
+					cur_dmac, tenant + 1);
 				binding->tx_table_rule = create_rule_tx_fwd_to_sws_table(
 					app_ctx.tx_matcher, cur_dmac);
 				binding->tx_vport_rule = create_rule_tx_fwd_to_vport(

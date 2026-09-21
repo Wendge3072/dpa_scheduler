@@ -63,7 +63,10 @@ sch 线程 rollover 模式切换开关
 #define MAX_CYCLE_PERCENTAGE_DPU_MEM 8483
 #define MAX_CYCLE_TOTAL 10000
 #define WORKER_BATCH_SIZE 1048576UL
-#define WORKER_QUEUE_POLL_CYCLE_LIMIT 148480UL
+#define WORKER_QUEUE_POLL_PACKET_LIMIT 64U
+#define WORKER_ACCOUNT_SAMPLE_SHIFT 4U
+#define WORKER_ACCOUNT_SAMPLE_INTERVAL (1U << WORKER_ACCOUNT_SAMPLE_SHIFT)
+#define WORKER_ACCOUNT_SAMPLE_MASK (WORKER_ACCOUNT_SAMPLE_INTERVAL - 1U)
 #define SCHED_PERIOD_CYCLES (DPA_FREQ_HZ / 1000)
 #define WC_BUDGET_CAP_NUM 2
 #define WC_BUDGET_CAP_DEN 1
@@ -149,9 +152,6 @@ struct dpa_sche_context {
 	size_t tenant_bw_budget_cap[MAX_TENANT_NUM];
 	size_t tenant_cycle_debt[MAX_TENANT_NUM];
 	uint8_t restrict_tenant[MAX_TENANT_NUM];
-	uint64_t tenant_packets_forwarded[MAX_TENANT_NUM];
-	uint64_t tenant_packets_dropped[MAX_TENANT_NUM];
-	uint64_t tenant_bytes_forwarded[MAX_TENANT_NUM];
 	uint64_t dmac_base;
 	uint32_t tenants_num;
 	uint32_t tenant_shards;
@@ -359,42 +359,16 @@ pp_workload_nof(struct dpa_thread_context *thd_ctx, char *packet, uint32_t packe
 	__dpa_thread_window_writeback();
 }
 
-static inline __attribute__((always_inline)) uint64_t
-pp_read_dmac(const char *packet)
-{
-	const uint8_t *mac = (const uint8_t *)packet;
-
-	return ((uint64_t)mac[0] << 40) |
-	       ((uint64_t)mac[1] << 32) |
-	       ((uint64_t)mac[2] << 24) |
-	       ((uint64_t)mac[3] << 16) |
-	       ((uint64_t)mac[4] << 8) |
-	       (uint64_t)mac[5];
-}
-
 static inline __attribute__((always_inline)) uint32_t
-pp_decode_tenant(const struct dpa_sche_context *sch_ctx,
-		 const char *packet, uint32_t packet_size)
+pp_decode_tenant_tag(const struct flexio_dev_cqe64 *cqe)
 {
-	register uint64_t dmac;
-	register uint64_t offset;
-	register uint64_t binding_count;
+	register uint32_t tag =
+		be32_to_cpu((volatile __be32)cqe->qpn) & 0x00ffffffU;
 
-	if (packet_size < 6 || !sch_ctx->tenant_shards || !sch_ctx->tenants_num) {
+	if (!tag) {
 		return MAX_TENANT_NUM;
 	}
-
-	dmac = pp_read_dmac(packet);
-	if (dmac < sch_ctx->dmac_base) {
-		return MAX_TENANT_NUM;
-	}
-	offset = dmac - sch_ctx->dmac_base;
-	binding_count = (uint64_t)sch_ctx->tenants_num * sch_ctx->tenant_shards;
-	if (offset >= binding_count) {
-		return MAX_TENANT_NUM;
-	}
-
-	return (uint32_t)(offset / sch_ctx->tenant_shards);
+	return tag - 1;
 }
 
 /*
@@ -444,7 +418,7 @@ _name(struct flexio_dev_thread_ctx *dtctx, \
 	packet = (_host_buffer) ? \
 		(char *)((flexio_uintptr_t)rq_data - rq_ctx->rqd_host_addr + \
 			 rq_ctx->rqd_dpa_addr) : rq_data; \
-	*tenant_id = pp_decode_tenant(sch_ctx, packet, data_sz); \
+	*tenant_id = pp_decode_tenant_tag(rq_cq_ctx->cqe); \
 	*forwarded = *tenant_id < sch_ctx->tenants_num && \
 		!__atomic_load_n(&sch_ctx->restrict_tenant[*tenant_id], \
 				 __ATOMIC_RELAXED); \

@@ -28,7 +28,8 @@ struct flow_matcher {
 };
 
 struct flow_rule {
-	struct mlx5dv_dr_action *action;
+	struct mlx5dv_dr_action *actions[2];
+	uint32_t action_count;
 	struct mlx5dv_dr_rule *dr_rule;
 };
 
@@ -249,10 +250,12 @@ struct flow_matcher *create_matcher_rx(struct ibv_context *ibv_ctx);
 /* Create a SW flow steering rule for ethernet packets received on the NIC.
  *  ibv_ctx - context of the IBV device.
  *  tir_obj - TIR mlx5dv object
- *  smac - Source MAC address
+ *  dmac - Destination MAC address.
+ *  tenant_tag - Non-zero tenant identifier written to the receive CQE.
  */
 struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
-					   struct mlx5dv_devx_obj *tir_obj, uint64_t smac);
+					   struct mlx5dv_devx_obj *tir_obj,
+					   uint64_t dmac, uint32_t tenant_tag);
 
 /* Create a flow matcher for Ethernet packets transmitted on the NIC.
  *  ibv_ctx - context of the IBV device.

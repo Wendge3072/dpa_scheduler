@@ -341,11 +341,6 @@ void sch_ctx_init(struct flexio_dev_thread_ctx *dtctx,
 	}
 	sch_init_cycle_accounting(&(dpa_schs_ctx[i]), data_from_host);
 	sch_init_bandwidth_accounting(&(dpa_schs_ctx[i]), data_from_host);
-	for (uint32_t t = 0; t < data_from_host->tenants_num; t++) {
-		dpa_schs_ctx[i].tenant_packets_forwarded[t] = 0;
-		dpa_schs_ctx[i].tenant_packets_dropped[t] = 0;
-		dpa_schs_ctx[i].tenant_bytes_forwarded[t] = 0;
-	}
 #if SCH_CYCLE_USAGE_REPORT
 	dpa_schs_ctx[i].tenant_cycle_report_periods = 0;
 #endif

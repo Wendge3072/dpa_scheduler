@@ -75,10 +75,13 @@ sch_check_budget(struct dpa_sche_context *sch_ctx, uint32_t tenants_num)
 static inline __attribute__((always_inline)) void
 sch_reset_tenant_restriction(struct dpa_sche_context *sch_ctx, uint32_t tenant)
 {
-	uint8_t restriction =
-		sch_ctx->tenant_cycle_target[tenant] &&
-		sch_ctx->tenant_bw_target[tenant] ?
-		TENANT_RESTRICT_NONE : TENANT_RESTRICT_CYCLE;
+	uint8_t restriction = TENANT_RESTRICT_NONE;
+
+	if (!sch_ctx->tenant_cycle_budget[tenant]) {
+		restriction = TENANT_RESTRICT_CYCLE;
+	} else if (!sch_ctx->tenant_bw_budget[tenant]) {
+		restriction = TENANT_RESTRICT_BW;
+	}
 
 	__atomic_store_n(&sch_ctx->restrict_tenant[tenant], restriction,
 			 __ATOMIC_RELAXED);
@@ -209,10 +212,12 @@ sch_rollover_budget(struct dpa_sche_context *sch_ctx,
 		bw_pool = sch_budget_receive(&sch_ctx->tenant_bw_budget[t],
 					     sch_ctx->tenant_bw_budget_cap[t],
 					     bw_pool);
-		sch_reset_tenant_restriction(sch_ctx, t);
 	}
 
 	sch_apply_cycle_debt(sch_ctx, tenants_num);
+	for (register uint32_t t = 0; t < tenants_num; t++) {
+		sch_reset_tenant_restriction(sch_ctx, t);
+	}
 }
 #elif SCH_ROLLOVER_WORK_CONSERVING == SCH_ROLLOVER_MODE_DRF
 static inline __attribute__((always_inline)) size_t
@@ -419,17 +424,14 @@ sch_rollover_budget(struct dpa_sche_context *sch_ctx,
 		sch_budget_receive(&sch_ctx->tenant_bw_budget[single_active_tenant],
 				   sch_ctx->tenant_bw_budget_cap[single_active_tenant],
 				   bw_pool);
-		sch_reset_tenant_restriction(sch_ctx, single_active_tenant);
 	} else if (active_count > 1) {
 		sch_distribute_drf_pool(sch_ctx, tenants_num, cycle_pool, bw_pool);
-		for (register uint32_t t = 0; t < tenants_num; t++) {
-			if (sch_ctx->restrict_tenant[t]) {
-				sch_reset_tenant_restriction(sch_ctx, t);
-			}
-		}
 	}
 
 	sch_apply_cycle_debt(sch_ctx, tenants_num);
+	for (register uint32_t t = 0; t < tenants_num; t++) {
+		sch_reset_tenant_restriction(sch_ctx, t);
+	}
 }
 #else
 #error "Unsupported SCH_ROLLOVER_WORK_CONSERVING mode"
@@ -450,7 +452,6 @@ sch_rollover_budget(struct dpa_sche_context *sch_ctx,
 				      &sch_ctx->tenant_cycle_debt[t]);
 		sch_ctx->tenant_cycle_budget[t] = sch_ctx->tenant_cycle_target[t];
 		sch_ctx->tenant_bw_budget[t] = sch_ctx->tenant_bw_target[t];
-		sch_reset_tenant_restriction(sch_ctx, t);
 #if SCH_CYCLE_USAGE_REPORT
 		sch_ctx->tenant_cycle_report_used[t] += cycle_used;
 #endif
@@ -459,6 +460,9 @@ sch_rollover_budget(struct dpa_sche_context *sch_ctx,
 	sch_ctx->tenant_cycle_report_periods++;
 #endif
 	sch_apply_cycle_debt(sch_ctx, tenants_num);
+	for (uint32_t t = 0; t < tenants_num; t++) {
+		sch_reset_tenant_restriction(sch_ctx, t);
+	}
 }
 #endif
 
@@ -484,31 +488,6 @@ sch_report_cycle_usage(struct dpa_sche_context *sch_ctx,
 	sch_ctx->tenant_cycle_report_periods = 0;
 }
 #endif
-
-static inline void
-sch_report_tenant_packets(struct dpa_sche_context *sch_ctx,
-			  int sch_id, uint32_t tenants_num)
-{
-	for (uint32_t t = 0; t < tenants_num; t++) {
-		uint64_t forwarded =
-			__atomic_exchange_n(&sch_ctx->tenant_packets_forwarded[t], 0,
-					    __ATOMIC_RELAXED);
-		uint64_t dropped =
-			__atomic_exchange_n(&sch_ctx->tenant_packets_dropped[t], 0,
-					    __ATOMIC_RELAXED);
-		uint64_t bytes =
-			__atomic_exchange_n(&sch_ctx->tenant_bytes_forwarded[t], 0,
-					    __ATOMIC_RELAXED);
-
-		if (forwarded || dropped) {
-			flexio_dev_print("sch %d tenant %u traffic: forwarded=%llu dropped=%llu bytes=%llu\n",
-					 sch_id, t,
-					 (unsigned long long)forwarded,
-					 (unsigned long long)dropped,
-					 (unsigned long long)bytes);
-		}
-	}
-}
 
 #if SCH_LOOP_ITER_REPORT
 static inline void
@@ -627,7 +606,6 @@ __dpa_global__ void flexio_scheduler_handle(uint64_t thread_arg) {
 #if SCH_CYCLE_USAGE_REPORT
 			sch_report_cycle_usage(this_sch_ctx, i, tenants_num);
 #endif
-			sch_report_tenant_packets(this_sch_ctx, i, tenants_num);
 #if SCH_LOOP_ITER_REPORT
 			sch_report_loop_iters(this_sch_ctx, i);
 #endif
